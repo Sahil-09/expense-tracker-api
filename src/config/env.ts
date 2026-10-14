@@ -34,6 +34,27 @@ function optionalList(name: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * An optional secret that gates a route, or null when the route is closed.
+ *
+ * `null` rather than '' on purpose: an unset code must disable the endpoint entirely, not
+ * enable it behind an empty string that anyone posting no field at all would match.
+ *
+ * The length floor is the point. A four-character code is guessable by anyone who finds
+ * the URL, and nothing about that failure is visible until it matters, so a short value
+ * is rejected at boot rather than left to be discovered later.
+ */
+function optionalSecret(name: string): string | null {
+  const value = (process.env[name] ?? '').trim();
+  if (!value) return null;
+  if (value.length < 12) {
+    throw new Error(
+      `${name} must be at least 12 characters. Generate one with: openssl rand -hex 24`,
+    );
+  }
+  return value;
+}
+
 /** Widened so the literal stays in the type; `ms` is what @nestjs/jwt's type wants. */
 export const ACCESS_TTL_MS = 15 * 60 * 1000;
 
@@ -48,6 +69,10 @@ export const env = {
   refreshTtlDays: optionalInt('REFRESH_TTL_DAYS', 30),
   /** Mobile clients send no Origin header, so this only constrains browser origins. */
   corsOrigins: optionalList('CORS_ORIGINS'),
+  /** Unset means POST /auth/register does not exist. */
+  signupCode: optionalSecret('SIGNUP_CODE'),
+  /** Unset means POST /auth/reset-password does not exist. */
+  resetCode: optionalSecret('RESET_CODE'),
 };
 
 export type Env = typeof env;

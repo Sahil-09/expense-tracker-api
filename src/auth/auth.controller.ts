@@ -1,16 +1,30 @@
 import { Body, Controller, HttpCode, Post } from '@nestjs/common';
 
 import { AuthService } from './auth.service';
-import { LoginDto, LogoutDto, RefreshDto } from './dto';
+import { LoginDto, LogoutDto, RefreshDto, RegisterDto, ResetPasswordDto } from './dto';
 
 /**
- * Login, refresh, logout. No register — the account is created by
- * `npm run bootstrap-user`, per ADR-004. Adding it later is the one route that would be
- * needed to open this up publicly.
+ * Login, signup, reset, refresh, logout.
+ *
+ * Signup and reset both answer 401 when their code is not set, so the routes are closed
+ * rather than merely refusing — there is no way to tell from outside whether an operator
+ * ever enabled them.
  */
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
+
+  @Post('register')
+  @HttpCode(201)
+  register(@Body() dto: RegisterDto) {
+    return this.auth.register(dto);
+  }
+
+  @Post('reset-password')
+  @HttpCode(204)
+  async resetPassword(@Body() dto: ResetPasswordDto): Promise<void> {
+    await this.auth.resetPassword(dto);
+  }
 
   @Post('login')
   @HttpCode(200)

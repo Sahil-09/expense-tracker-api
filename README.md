@@ -8,12 +8,32 @@ slow or gone, the app is indistinguishable from normal use.
 ## Running it
 
 ```bash
-cp .env.example .env          # then fill in two different JWT secrets
+cp .env.example .env          # then fill in MONGO_USER, MONGO_PASSWORD, and two JWT secrets
 docker compose up -d --build
-npm run bootstrap-user -- --email you@example.com --password '...'
 ```
 
 `GET /health` returns `{"status":"ok"}` and nothing else.
+
+### Accounts
+
+There is no signup form that anyone can reach. An account is created by handing someone
+the `SIGNUP_CODE` from `.env`:
+
+```bash
+# on the VPS
+echo 'your-password' | docker compose run --rm -T api \
+  node dist/users/bootstrap-user.js --email you@example.com
+```
+
+`-T` matters: without it Docker allocates a TTY and silently discards the piped password.
+
+Then in the app: **Settings → Sync → Sign in or create an account**. Use **Create** with
+the same code to make a new account, or **Sign in** for an existing one.
+
+`RESET_CODE` is a second, separate code for the app's "forgot my password" flow. It is
+deliberately a different value so leaking the signup code does not also let the holder take
+over an account that already exists. Unset either code and that route is closed — there is
+no default.
 
 ## Tests
 
@@ -27,12 +47,16 @@ npx tsc --noEmit
 | | |
 |---|---|
 | `GET /health` | Liveness only. No version, no uptime, no DB round trip. |
+| `POST /auth/register` | `{ email, password, code }` — closed unless `SIGNUP_CODE` is set |
+| `POST /auth/reset-password` | `{ email, newPassword, code }` — closed unless `RESET_CODE` is set |
 | `POST /auth/login` | `{ email, password, deviceId?, deviceName?, platform? }` |
 | `POST /auth/refresh` | `{ refreshToken }` — rotating; the old one stops working |
 | `POST /auth/logout` | `{ refreshToken }` — idempotent |
 | `POST /sync` | `{ deviceId, cursor?, expenses[], budgets[], exclusions[] }` |
 
-There is no signup route. The account is created once by the bootstrap script.
+`register` and `reset-password` answer 401 when their code is not configured, so an
+outsider cannot tell whether an operator ever enabled them. Reset answers identically for a
+known and an unknown address, so it cannot be used to find who has an account.
 
 ## How sync works
 
@@ -69,13 +93,27 @@ src/
 ## Security notes
 
 - Argon2id at the OWASP baseline (19 MiB / 2 passes).
+- The signup code is compared with `crypto.timingSafeEqual`, and **before** the password is
+  ever hashed. Checking it afterwards would make `/auth/register` a free ~50ms-CPU
+  password-hashing endpoint for anyone who can reach the URL.
+- Resetting a password revokes every session that account had. Otherwise a refresh token
+  stolen beforehand survives for its full 30 days and the reset bought nothing.
 - Refresh tokens stored as SHA-256 digests. They are random values, so there is nothing to
   brute-force; a database leak cannot be replayed as a token.
 - `rawSms` is never logged — `SafeLogger` redacts by key name, so a new call site cannot
   leak a message body by accident.
-- Helmet, an explicit CORS allowlist, a 2 MB body cap, and a global `ValidationPipe` with
+- Helmet, an explicit CORS allowlist, a 4 MB body cap, and a global `ValidationPipe` with
   `forbidNonWhitelisted`.
 - `/health` is public and says nothing.
+
+### Known limits
+
+- **No rate limiting.** With the code checked first, an attacker who does not have it never
+  reaches argon2, and `/auth/login` was already unthrottled. Caddy adds no limiter by
+  default either.
+- **No email verification.** Anyone holding `SIGNUP_CODE` can register an address that
+  someone else wants, including yours, and the unique index then blocks the real owner.
+  Give the code only to people you would hand your server to.
 
 ## Deploying
 
@@ -84,8 +122,10 @@ One box, two containers, TLS in front.
 ```bash
 cp .env.example .env
 # MONGO_USER, MONGO_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET — four openssl rand -hex 32
+# plus SIGNUP_CODE and RESET_CODE, two more, so accounts can be made and reset
 docker compose up -d --build
-npm run bootstrap-user -- --email you@example.com --password '...'
+echo 'the password' | docker compose run --rm -T api \
+  node dist/users/bootstrap-user.js --email you@example.com
 sudo cp ops/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
 ```
 

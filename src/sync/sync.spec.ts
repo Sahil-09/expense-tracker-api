@@ -82,9 +82,9 @@ describe('POST /sync', () => {
     const auth = app.get(AuthService);
     const account = app.get(UsersService);
     tokenFor = async (email, deviceId) => {
-      const user =
-        (await account.findByEmail(email)) ??
-        (await account.create(email, PASSWORD));
+      const existing = await account.findByEmail(email);
+      const user = existing ?? (await account.create(email, PASSWORD));
+      if (!user) throw new Error(`could not set up ${email}`);
       return (
         await auth.tokens(user._id, { email, password: PASSWORD, deviceId })
       ).accessToken;

@@ -17,12 +17,11 @@ import 'reflect-metadata';
 
 import { NestFactory } from '@nestjs/core';
 import { getModelToken } from '@nestjs/mongoose';
-import * as argon2 from 'argon2';
 import { Model } from 'mongoose';
 
 import { AppModule } from '../app.module';
 import { User, UserDocument } from './user.schema';
-import { ARGON_OPTIONS, UsersService } from './users.service';
+import { UsersService } from './users.service';
 
 function arg(name: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -61,13 +60,14 @@ async function main() {
     if (existing) {
       // Replace rather than fail: the common case is re-running this after a password
       // change, and refusing would just mean hand-editing the database instead.
-      existing.passwordHash = await argon2.hash(password, ARGON_OPTIONS);
-      await existing.save();
+      await users.setPassword(existing, password);
       console.log(`Reset the password for ${email}.`);
       return;
     }
 
-    await users.create(email, password);
+    if (!(await users.create(email, password))) {
+      throw new Error(`Could not create ${email} - the email is already registered.`);
+    }
     console.log(`Created ${email}.`);
   } finally {
     await app.close();
