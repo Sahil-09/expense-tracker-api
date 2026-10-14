@@ -2,6 +2,7 @@ import { Body, Controller, HttpCode, Post } from '@nestjs/common';
 
 import { AuthService } from './auth.service';
 import {
+  ForgotPasswordDto,
   LoginDto,
   LogoutDto,
   RefreshDto,
@@ -10,11 +11,12 @@ import {
 } from './dto';
 
 /**
- * Login, signup, reset, refresh, logout.
+ * Login, signup, password reset, refresh, logout.
  *
- * Signup and reset both answer 401 when their code is not set, so the routes are closed
- * rather than merely refusing — there is no way to tell from outside whether an operator
- * ever enabled them.
+ * Signup answers 401 when its code is not set, so that route is closed rather than merely
+ * refusing — there is no way to tell from outside whether an operator ever enabled it.
+ * Forgot-password is the opposite: always 200, so it cannot be used to find out which
+ * addresses have accounts.
  */
 @Controller('auth')
 export class AuthController {
@@ -24,6 +26,12 @@ export class AuthController {
   @HttpCode(201)
   register(@Body() dto: RegisterDto) {
     return this.auth.register(dto);
+  }
+
+  @Post('forgot-password')
+  @HttpCode(200)
+  async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<void> {
+    await this.auth.forgotPassword(dto.email);
   }
 
   @Post('reset-password')

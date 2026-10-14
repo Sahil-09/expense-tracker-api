@@ -30,10 +30,14 @@ echo 'your-password' | docker compose run --rm -T api \
 Then in the app: **Settings → Sync → Sign in or create an account**. Use **Create** with
 the same code to make a new account, or **Sign in** for an existing one.
 
-`RESET_CODE` is a second, separate code for the app's "forgot my password" flow. It is
-deliberately a different value so leaking the signup code does not also let the holder take
-over an account that already exists. Unset either code and that route is closed — there is
-no default.
+Locked out is an email now, not a code from the owner. `POST /auth/forgot-password` sends the
+address an 8-digit code; `POST /auth/reset-password` takes that code with the new password.
+The code expires after 15 minutes, works once, and the reset revokes every session that
+account had.
+
+Sending it needs `RESEND_API_KEY` and `MAIL_FROM` in `.env`, and Resend needs a sending
+domain you have verified. Leave either unset and both routes still answer normally — no mail
+goes out and nothing says so.
 
 ## Tests
 
@@ -48,15 +52,22 @@ npx tsc --noEmit
 |---|---|
 | `GET /health` | Liveness only. No version, no uptime, no DB round trip. |
 | `POST /auth/register` | `{ email, password, code }` — closed unless `SIGNUP_CODE` is set |
-| `POST /auth/reset-password` | `{ email, newPassword, code }` — closed unless `RESET_CODE` is set |
+| `POST /auth/forgot-password` | `{ email }` — always 200; mails a code if mail is configured |
+| `POST /auth/reset-password` | `{ email, code, newPassword }` — 204, or 401 on a bad, expired or used code |
 | `POST /auth/login` | `{ email, password, deviceId?, deviceName?, platform? }` |
 | `POST /auth/refresh` | `{ refreshToken }` — rotating; the old one stops working |
 | `POST /auth/logout` | `{ refreshToken }` — idempotent |
 | `POST /sync` | `{ deviceId, cursor?, expenses[], budgets[], exclusions[] }` |
 
-`register` and `reset-password` answer 401 when their code is not configured, so an
-outsider cannot tell whether an operator ever enabled them. Reset answers identically for a
-known and an unknown address, so it cannot be used to find who has an account.
+`register` answers 401 when `SIGNUP_CODE` is not configured, so an outsider cannot tell
+whether an operator ever enabled it. The reset routes answer identically for a known and an
+unknown address — `forgot-password` is always 200 — so neither can be used to find out who
+has an account.
+
+The emailed code is 8 digits, expires after 15 minutes, and is consumed the first time it
+works. Only `sha256(userId + ':' + code)` is stored, so it cannot be looked up and re-sent;
+one per address per 60 seconds is allowed, which is a throttle on the inbox rather than on
+the guessing.
 
 ## How sync works
 
@@ -108,12 +119,15 @@ src/
 
 ### Known limits
 
-- **No rate limiting.** With the code checked first, an attacker who does not have it never
-  reaches argon2, and `/auth/login` was already unthrottled. Caddy adds no limiter by
-  default either.
+- **No rate limiting.** `/auth/login` was already unthrottled, and the reset code space is 8
+  digits with a 15-minute window as the only thing bounding a guess. The 60-second cooldown
+  keeps an inbox from filling up; it is not a limiter. Caddy adds no limiter by default.
 - **No email verification.** Anyone holding `SIGNUP_CODE` can register an address that
   someone else wants, including yours, and the unique index then blocks the real owner.
   Give the code only to people you would hand your server to.
+- **The owner has no override.** `RESET_CODE` was removed rather than kept as a back door, so
+  a wrong address or a Resend outage leaves the account unreachable without hand-editing the
+  database. That was the deliberate trade for not holding a second secret.
 
 ## Deploying
 
@@ -122,7 +136,8 @@ One box, two containers, TLS in front.
 ```bash
 cp .env.example .env
 # MONGO_USER, MONGO_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET — four openssl rand -hex 32
-# plus SIGNUP_CODE and RESET_CODE, two more, so accounts can be made and reset
+# plus SIGNUP_CODE, one more, so accounts can be made. RESEND_API_KEY and MAIL_FROM are
+# optional, but without both, password reset sends nothing and says 200 anyway
 docker compose up -d --build
 echo 'the password' | docker compose run --rm -T api \
   node dist/users/bootstrap-user.js --email you@example.com

@@ -5,14 +5,38 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/mongoose';
-import { createHash, randomUUID, timingSafeEqual } from 'crypto';
+import { createHash, randomInt, randomUUID, timingSafeEqual } from 'crypto';
 import { Model, Types } from 'mongoose';
 
 import { env } from '../config/env';
 import { Device, DeviceDocument } from '../devices/device.schema';
+import { SafeLogger } from '../logging/safe-logger';
+import { sendPasswordResetEmail } from '../mail/resend';
+import {
+  PasswordReset,
+  PasswordResetDocument,
+} from '../password-resets/password-reset.schema';
 import { UserDocument } from '../users/user.schema';
 import { UsersService } from '../users/users.service';
 import { LoginDto, RegisterDto, ResetPasswordDto } from './dto';
+
+/** How long a mailed code is good for, and how long before another one may be sent. */
+const CODE_TTL_MS = 15 * 60 * 1000;
+const RESEND_COOLDOWN_MS = 60_000;
+
+/**
+ * SHA-256 of `${userId}:${code}`.
+ *
+ * Not argon2: an eight-digit code has under 27 bits of entropy and is only alive for
+ * fifteen minutes, so the expensive work would buy nothing against an offline guess but
+ * would make every reset a slow login. Binding the hash to the user costs nothing and
+ * means a hash lifted from one row cannot be replayed against another.
+ */
+function codeHash(userId: Types.ObjectId, code: string): string {
+  return createHash('sha256')
+    .update(`${userId.toString()}:${code}`)
+    .digest('hex');
+}
 
 /**
  * The refresh token is stored as a SHA-256 digest, not hashed with argon2.
@@ -47,8 +71,12 @@ type DeviceInfo = {
 
 @Injectable()
 export class AuthService {
+  private readonly log = new SafeLogger(AuthService.name);
+
   constructor(
     @InjectModel(Device.name) private readonly devices: Model<DeviceDocument>,
+    @InjectModel(PasswordReset.name)
+    private readonly resets: Model<PasswordResetDocument>,
     private readonly users: UsersService,
     private readonly jwt: JwtService,
   ) {}
@@ -168,19 +196,87 @@ export class AuthService {
   }
 
   /**
-   * Changes a password, gated by the owner's RESET_CODE.
+   * Mails a fresh code. Always answers the same thing, whatever the address.
    *
-   * No confirmation of whether the account exists: the route answers identically either
-   * way, for the same reason login does.
+   * An unknown email returns before any row is written and before any mail is sent, so
+   * this endpoint cannot be used to find out who has an account — the point being that
+   * the response and its timing give away nothing either.
+   */
+  async forgotPassword(email: string): Promise<void> {
+    const user = await this.users.findByEmail(email);
+    if (!user) return;
+
+    const now = new Date();
+    const live = await this.resets
+      .findOne({
+        userId: user._id,
+        consumedAt: null,
+        expiresAt: { $gt: now },
+      })
+      .exec();
+
+    // Throttle: one mail per address per minute. We cannot resend the code we already
+    // sent, because only its hash was kept, so the alternative to refusing is to mail a
+    // second code and silently retire the first.
+    if (live && now.getTime() - live.createdAt.getTime() < RESEND_COOLDOWN_MS) {
+      return;
+    }
+
+    if (live)
+      await this.resets
+        .updateOne({ _id: live._id }, { $set: { consumedAt: now } })
+        .exec();
+
+    // Eight digits, not six: there is no rate limiter on the spending endpoint, and six
+    // is guessable inside the fifteen-minute window.
+    const code = randomInt(0, 100_000_000).toString().padStart(8, '0');
+    await this.resets.create({
+      userId: user._id,
+      codeHash: codeHash(user._id, code),
+      expiresAt: new Date(now.getTime() + CODE_TTL_MS),
+      consumedAt: null,
+    });
+
+    try {
+      await sendPasswordResetEmail(user.email, code);
+    } catch (e) {
+      // Fail open. The response has to be a 200 whether or not the account exists, and a
+      // 500 here would turn every Resend outage into a signal that a given address is
+      // registered. The row stays: the code is still valid, and the request can simply
+      // be made again once the cooldown passes.
+      this.log.error('Could not send a password reset email', e);
+    }
+  }
+
+  /**
+   * Spends a mailed code.
+   *
+   * The consumption is the lookup, so the same code cannot be spent twice: the second
+   * request finds nothing unconsumed to match and is rejected.
    *
    * Every existing session is dropped. Without that, a refresh token stolen before the
    * reset still works for its full 30 days and the reset bought nothing at all.
    */
   async resetPassword(dto: ResetPasswordDto): Promise<void> {
-    this.assertCode(env.resetCode, dto.code);
-
     const user = await this.users.findByEmail(dto.email);
-    if (!user) return;
+    if (!user) throw new UnauthorizedException('That code is not valid');
+
+    const consumed = await this.resets
+      .findOneAndUpdate(
+        {
+          userId: user._id,
+          codeHash: codeHash(user._id, dto.code),
+          consumedAt: null,
+          expiresAt: { $gt: new Date() },
+        },
+        { $set: { consumedAt: new Date() } },
+        { new: false },
+      )
+      .exec();
+
+    // Wrong, already spent, expired and unknown address all fail identically, so the
+    // error cannot be used to tell which of them happened.
+    if (!consumed) throw new UnauthorizedException('That code is not valid');
 
     await this.users.setPassword(user, dto.newPassword);
     await this.devices

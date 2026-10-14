@@ -76,19 +76,23 @@ export class RegisterDto {
   platform?: string;
 }
 
+export class ForgotPasswordDto {
+  @IsEmail()
+  email: string;
+}
+
 export class ResetPasswordDto {
   @IsEmail()
   email: string;
+
+  /** The code from the email. Eight digits, single use, and dead after 15 minutes. */
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(20)
+  code: string;
 
   @IsString()
   @MinLength(10)
   @MaxLength(200)
   newPassword: string;
-
-  /** The owner's RESET_CODE, which is deliberately not the signup code: leaking one
-   * should not also let someone take over an account that already exists. */
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(200)
-  code: string;
 }

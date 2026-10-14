@@ -55,6 +55,12 @@ function optionalSecret(name: string): string | null {
   return value;
 }
 
+function optionalString(name: string): string | null {
+  const value = process.env[name];
+  if (value === undefined || value === '') return null;
+  return value;
+}
+
 /** Widened so the literal stays in the type; `ms` is what @nestjs/jwt's type wants. */
 export const ACCESS_TTL_MS = 15 * 60 * 1000;
 
@@ -71,8 +77,10 @@ export const env = {
   corsOrigins: optionalList('CORS_ORIGINS'),
   /** Unset means POST /auth/register does not exist. */
   signupCode: optionalSecret('SIGNUP_CODE'),
-  /** Unset means POST /auth/reset-password does not exist. */
-  resetCode: optionalSecret('RESET_CODE'),
+  /** Unset means password-reset email is not sent; the request still answers 200. */
+  resendApiKey: optionalSecret('RESEND_API_KEY'),
+  /** Verified sender, `name <address>`. Unset means password-reset email is not sent. */
+  mailFrom: optionalString('MAIL_FROM'),
 };
 
 export type Env = typeof env;

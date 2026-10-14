@@ -32,7 +32,21 @@ async function bootstrap() {
   );
 
   await app.listen(env.port, '0.0.0.0');
-  new SafeLogger('bootstrap').log(`Expense Tracker API on :${env.port}`);
+  const log = new SafeLogger('bootstrap');
+  log.log(`Expense Tracker API on :${env.port}`);
+
+  // Said out loud, because forgot-password fails open by design: it answers 200 whether
+  // or not a mail went out, so a box with no mail configured looks exactly like a working
+  // one until somebody tries to reset a password and waits for an email that never comes.
+  if (env.signupCode === null) {
+    log.warn('SIGNUP_CODE is not set: POST /auth/register is closed.');
+  }
+  if (env.resendApiKey === null || env.mailFrom === null) {
+    log.warn(
+      'RESEND_API_KEY and MAIL_FROM are not both set: POST /auth/forgot-password will ' +
+        'answer 200 and send nothing.',
+    );
+  }
 }
 
 bootstrap().catch((e) => {

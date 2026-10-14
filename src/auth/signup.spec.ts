@@ -8,25 +8,43 @@ import request from 'supertest';
 import { AuthService } from './auth.service';
 import { AuthModule } from './auth.module';
 import { env } from '../config/env';
+import { sendPasswordResetEmail } from '../mail/resend';
+import {
+  PasswordReset,
+  PasswordResetDocument,
+} from '../password-resets/password-reset.schema';
 import { User } from '../users/user.schema';
 import { UsersModule } from '../users/users.module';
 import { UsersService } from '../users/users.service';
 
-const PASSWORD = 'a long enough passphrase';
-const SIGNUP = 'signup-code-abcdefghij';
-const RESET = 'reset-code-abcdefghijkl';
+jest.mock('../mail/resend', () => ({
+  sendPasswordResetEmail: jest.fn().mockResolvedValue(undefined),
+}));
 
-describe('signup and reset', () => {
+const PASSWORD = 'a long enough passphrase';
+const NEW_PASSWORD = 'a brand new passphrase';
+const SIGNUP = 'signup-code-abcdefghij';
+
+const mailer = sendPasswordResetEmail as jest.MockedFunction<
+  typeof sendPasswordResetEmail
+>;
+
+describe('signup and password reset', () => {
   let app: INestApplication;
   let mongo: MongoMemoryServer;
   const users = () => app.get(UsersService);
-  const model = () =>
+  const userRows = () =>
     app.get<Model<{ deleteMany(q: unknown): Promise<unknown> }>>(
       getModelToken(User.name),
     );
+  const resets = () =>
+    app.get<Model<PasswordResetDocument>>(getModelToken(PasswordReset.name));
 
   const post = (path: string, body: Record<string, unknown>) =>
     request(app.getHttpServer()).post(path).send(body);
+
+  /** The last code handed to the mailer. The only way to read it: nothing else ever has it. */
+  const mailedCode = () => mailer.mock.calls.at(-1)?.[1] as string;
 
   beforeAll(async () => {
     mongo = await MongoMemoryServer.create();
@@ -55,14 +73,18 @@ describe('signup and reset', () => {
   });
 
   beforeEach(async () => {
-    await model().deleteMany({});
+    await userRows().deleteMany({});
+    await resets().deleteMany({});
+    mailer.mockClear();
+    mailer.mockResolvedValue(undefined);
     // env is read once at import, so this is the only way to exercise both states in one
     // process. Nothing else reads process.env for these.
     env.signupCode = null;
-    env.resetCode = null;
+    env.resendApiKey = 'resend-key-abcdefghij';
+    env.mailFrom = 'Expense Tracker <no-reply@example.com>';
   });
 
-  describe('closed: neither code is configured', () => {
+  describe('closed: signup code is not configured', () => {
     it('refuses signup the same way it refuses a wrong code', async () => {
       const res = await post('/auth/register', {
         email: 'closed@example.com',
@@ -72,22 +94,11 @@ describe('signup and reset', () => {
       expect(res.status).toBe(401);
       expect(await users().findByEmail('closed@example.com')).toBeNull();
     });
-
-    it('refuses a reset without revealing anything', async () => {
-      await users().create('someone@example.com', PASSWORD);
-      const res = await post('/auth/reset-password', {
-        email: 'someone@example.com',
-        newPassword: 'irrelevant when closed',
-        code: 'anything at all',
-      });
-      expect(res.status).toBe(401);
-    });
   });
 
-  describe('open: both codes are configured', () => {
+  describe('register', () => {
     beforeEach(() => {
       env.signupCode = SIGNUP;
-      env.resetCode = RESET;
     });
 
     it('creates an account and hands back a usable session', async () => {
@@ -134,27 +145,103 @@ describe('signup and reset', () => {
       expect(res.status).toBe(400);
       expect(await users().findByEmail('new@example.com')).toBeNull();
     });
+  });
 
-    it('resets a password so the new one works and the old one does not', async () => {
+  describe('forgot-password', () => {
+    it('answers 200 and does nothing at all for an unknown address', async () => {
+      const res = await post('/auth/forgot-password', {
+        email: 'ghost@example.com',
+      });
+      expect(res.status).toBe(200);
+      expect(await resets().countDocuments({})).toBe(0);
+      expect(mailer).not.toHaveBeenCalled();
+    });
+
+    it('mails one code and stores one hash for a known address', async () => {
       await users().create('taken@example.com', PASSWORD);
-
-      await post('/auth/reset-password', {
+      await post('/auth/forgot-password', {
         email: 'taken@example.com',
-        newPassword: 'a brand new passphrase',
-        code: RESET,
-      }).expect(204);
-
-      await post('/auth/login', {
-        email: 'taken@example.com',
-        password: 'a brand new passphrase',
       }).expect(200);
+
+      expect(mailer).toHaveBeenCalledTimes(1);
+      expect(mailer.mock.calls[0][0]).toBe('taken@example.com');
+      expect(await resets().countDocuments({})).toBe(1);
+
+      // The stored value is the hash, not the code. Equal length, zero shared characters.
+      const stored = String((await resets().findOne({}))?.codeHash ?? '');
+      expect(stored).toHaveLength(64);
+      expect(stored).not.toContain(mailedCode());
+    });
+
+    it('issues a second request inside the cooldown no second row', async () => {
+      await users().create('taken@example.com', PASSWORD);
+      await post('/auth/forgot-password', {
+        email: 'taken@example.com',
+      }).expect(200);
+      await post('/auth/forgot-password', {
+        email: 'taken@example.com',
+      }).expect(200);
+
+      expect(await resets().countDocuments({})).toBe(1);
+      expect(mailer).toHaveBeenCalledTimes(1);
+    });
+
+    it('still answers 200 when the mail never went out', async () => {
+      await users().create('taken@example.com', PASSWORD);
+      mailer.mockRejectedValue(new Error('resend is down'));
+
+      const res = await post('/auth/forgot-password', {
+        email: 'taken@example.com',
+      });
+      expect(res.status).toBe(200);
+      // A row exists but nothing was delivered, so the next real attempt is still throttled.
+      expect(await resets().countDocuments({})).toBe(1);
+    });
+  });
+
+  describe('reset-password', () => {
+    const requestReset = async () => {
+      await users().create('taken@example.com', PASSWORD);
+      await post('/auth/forgot-password', {
+        email: 'taken@example.com',
+      }).expect(200);
+      return mailedCode();
+    };
+
+    it('rejects a wrong code and leaves the old password working', async () => {
+      await requestReset();
+
+      const res = await post('/auth/reset-password', {
+        email: 'taken@example.com',
+        newPassword: NEW_PASSWORD,
+        code: '00000000',
+      });
+      expect(res.status).toBe(401);
+
       await post('/auth/login', {
         email: 'taken@example.com',
         password: PASSWORD,
-      }).expect(401);
+      }).expect(200);
     });
 
-    it('kills every existing session when a password is reset', async () => {
+    it('answers an unknown address exactly as it answers a wrong code', async () => {
+      await requestReset();
+      const wrongCode = await post('/auth/reset-password', {
+        email: 'taken@example.com',
+        newPassword: NEW_PASSWORD,
+        code: '00000000',
+      });
+      const unknown = await post('/auth/reset-password', {
+        email: 'ghost@example.com',
+        newPassword: NEW_PASSWORD,
+        code: mailedCode(),
+      });
+      expect(wrongCode.status).toBe(401);
+      expect(unknown.status).toBe(401);
+      expect(unknown.body).toEqual(wrongCode.body);
+    });
+
+    it('sets the new password and kills every existing session', async () => {
       await users().create('taken@example.com', PASSWORD);
       const auth = app.get(AuthService);
       const { user } = await auth.login({
@@ -163,52 +250,96 @@ describe('signup and reset', () => {
         deviceId: 'phone-a',
       });
       const issued = await auth.tokens(user._id, {
+        deviceId: 'phone-a',
         email: 'taken@example.com',
         password: PASSWORD,
-        deviceId: 'phone-a',
       });
+      await post('/auth/forgot-password', {
+        email: 'taken@example.com',
+      }).expect(200);
 
       await post('/auth/reset-password', {
         email: 'taken@example.com',
-        newPassword: 'a brand new passphrase',
-        code: RESET,
+        newPassword: NEW_PASSWORD,
+        code: mailedCode(),
       }).expect(204);
 
+      await post('/auth/login', {
+        email: 'taken@example.com',
+        password: NEW_PASSWORD,
+      }).expect(200);
+      await post('/auth/login', {
+        email: 'taken@example.com',
+        password: PASSWORD,
+      }).expect(401);
       // A token stolen before the reset must not survive it, or the reset bought nothing.
       await post('/auth/refresh', { refreshToken: issued.refreshToken }).expect(
         401,
       );
     });
 
-    it('never says whether an account exists on reset', async () => {
-      await users().create('taken@example.com', PASSWORD);
-      const known = await post('/auth/reset-password', {
-        email: 'taken@example.com',
-        newPassword: 'a brand new passphrase',
-        code: RESET,
-      });
-      const unknown = await post('/auth/reset-password', {
-        email: 'ghost@example.com',
-        newPassword: 'a brand new passphrase',
-        code: RESET,
-      });
-      expect(known.status).toBe(204);
-      expect(unknown.status).toBe(204);
-      expect(known.body).toEqual(unknown.body);
-    });
+    it('will not spend the same code twice', async () => {
+      const code = await requestReset();
 
-    it('will not reset with the signup code', async () => {
-      await users().create('taken@example.com', PASSWORD);
       await post('/auth/reset-password', {
         email: 'taken@example.com',
-        newPassword: 'a brand new passphrase',
-        code: SIGNUP,
+        newPassword: NEW_PASSWORD,
+        code,
+      }).expect(204);
+      await post('/auth/reset-password', {
+        email: 'taken@example.com',
+        newPassword: 'yet another passphrase',
+        code,
       }).expect(401);
-      // The original password still works, so the attempt really did nothing.
+
+      // The second attempt really did nothing.
+      await post('/auth/login', {
+        email: 'taken@example.com',
+        password: NEW_PASSWORD,
+      }).expect(200);
+    });
+
+    it('rejects a code that has expired', async () => {
+      const code = await requestReset();
+      await resets()
+        .updateMany({}, { $set: { expiresAt: new Date(0) } })
+        .exec();
+
+      await post('/auth/reset-password', {
+        email: 'taken@example.com',
+        newPassword: NEW_PASSWORD,
+        code,
+      }).expect(401);
       await post('/auth/login', {
         email: 'taken@example.com',
         password: PASSWORD,
       }).expect(200);
+    });
+
+    it('rejects a code that has already been superseded by a newer one', async () => {
+      const code = await requestReset();
+      // Ages the live reset past the cooldown, so the next request mints a second code.
+      // Straight to the collection: `timestamps: true` rewrites createdAt on every
+      // update, which would undo the ageing that lifts the cooldown.
+      await resets().collection.updateMany(
+        {},
+        { $set: { createdAt: new Date(Date.now() - 120_000) } },
+      );
+      await post('/auth/forgot-password', {
+        email: 'taken@example.com',
+      }).expect(200);
+      expect(mailer.mock.calls).toHaveLength(2);
+
+      await post('/auth/reset-password', {
+        email: 'taken@example.com',
+        newPassword: NEW_PASSWORD,
+        code,
+      }).expect(401);
+      await post('/auth/reset-password', {
+        email: 'taken@example.com',
+        newPassword: NEW_PASSWORD,
+        code: mailedCode(),
+      }).expect(204);
     });
   });
 });
