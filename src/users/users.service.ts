@@ -21,12 +21,18 @@ export const ARGON_OPTIONS: argon2.HashOptions = {
 
 /** Mongo's duplicate-key error, which is what the unique index on email raises. */
 function isDuplicateKey(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && (e as { code?: number }).code === 11000;
+  return (
+    typeof e === 'object' &&
+    e !== null &&
+    (e as { code?: number }).code === 11000
+  );
 }
 
 @Injectable()
 export class UsersService {
-  constructor(@InjectModel(User.name) private readonly users: Model<UserDocument>) {}
+  constructor(
+    @InjectModel(User.name) private readonly users: Model<UserDocument>,
+  ) {}
 
   /**
    * Null when the email is taken.

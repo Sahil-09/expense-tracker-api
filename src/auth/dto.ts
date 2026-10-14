@@ -59,6 +59,21 @@ export class RegisterDto {
   @IsNotEmpty()
   @MaxLength(200)
   code: string;
+
+  /**
+   * Optional device details, so a device created by registering is as identifiable as
+   * one created by logging in. Without these it would sit in the device list as
+   * "Phone / unknown" until the user happened to sign in again.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  deviceName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  platform?: string;
 }
 
 export class ResetPasswordDto {

@@ -8,7 +8,7 @@ import request from 'supertest';
 import { AuthService } from './auth.service';
 import { AuthModule } from './auth.module';
 import { env } from '../config/env';
-import { User, UserSchema } from '../users/user.schema';
+import { User } from '../users/user.schema';
 import { UsersModule } from '../users/users.module';
 import { UsersService } from '../users/users.service';
 
@@ -21,7 +21,9 @@ describe('signup and reset', () => {
   let mongo: MongoMemoryServer;
   const users = () => app.get(UsersService);
   const model = () =>
-    app.get<Model<{ deleteMany(q: unknown): Promise<unknown> }>>(getModelToken(User.name));
+    app.get<Model<{ deleteMany(q: unknown): Promise<unknown> }>>(
+      getModelToken(User.name),
+    );
 
   const post = (path: string, body: Record<string, unknown>) =>
     request(app.getHttpServer()).post(path).send(body);
@@ -38,7 +40,11 @@ describe('signup and reset', () => {
 
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(
-      new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
     );
     await app.init();
   }, 60_000);
@@ -142,7 +148,10 @@ describe('signup and reset', () => {
         email: 'taken@example.com',
         password: 'a brand new passphrase',
       }).expect(200);
-      await post('/auth/login', { email: 'taken@example.com', password: PASSWORD }).expect(401);
+      await post('/auth/login', {
+        email: 'taken@example.com',
+        password: PASSWORD,
+      }).expect(401);
     });
 
     it('kills every existing session when a password is reset', async () => {
@@ -166,7 +175,9 @@ describe('signup and reset', () => {
       }).expect(204);
 
       // A token stolen before the reset must not survive it, or the reset bought nothing.
-      await post('/auth/refresh', { refreshToken: issued.refreshToken }).expect(401);
+      await post('/auth/refresh', { refreshToken: issued.refreshToken }).expect(
+        401,
+      );
     });
 
     it('never says whether an account exists on reset', async () => {
@@ -194,7 +205,10 @@ describe('signup and reset', () => {
         code: SIGNUP,
       }).expect(401);
       // The original password still works, so the attempt really did nothing.
-      await post('/auth/login', { email: 'taken@example.com', password: PASSWORD }).expect(200);
+      await post('/auth/login', {
+        email: 'taken@example.com',
+        password: PASSWORD,
+      }).expect(200);
     });
   });
 });

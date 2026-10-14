@@ -35,6 +35,16 @@ export type AccessPayloadResult = {
   deviceId: string;
 };
 
+/** The device fields both LoginDto and RegisterDto carry. */
+type DeviceInfo = {
+  deviceId?: string;
+  deviceName?: string;
+  platform?: string;
+  /** Carried but unread here, so a LoginDto can be passed straight through. */
+  email?: string;
+  password?: string;
+};
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -52,7 +62,7 @@ export class AuthService {
     return { user };
   }
 
-  async tokens(userId: Types.ObjectId, dto: LoginDto) {
+  async tokens(userId: Types.ObjectId, dto: DeviceInfo) {
     const device = dto.deviceId
       ? await this.touchDevice(userId, dto)
       : await this.createDevice(userId, dto);
@@ -115,7 +125,10 @@ export class AuthService {
    * JWT library use. Sending milliseconds here makes a client that trusts the number
    * believe a 15-minute token is good for ten days.
    */
-  private session(device: DeviceDocument, refreshToken: string): AccessPayloadResult {
+  private session(
+    device: DeviceDocument,
+    refreshToken: string,
+  ): AccessPayloadResult {
     const accessToken = this.jwt.sign(
       {
         sub: device.userId.toString(),
@@ -173,7 +186,10 @@ export class AuthService {
     await this.devices
       .updateMany(
         { userId: user._id },
-        { $unset: { refreshTokenHash: '', refreshTokenExpiresAt: '' }, $set: { revokedAt: new Date() } },
+        {
+          $unset: { refreshTokenHash: '', refreshTokenExpiresAt: '' },
+          $set: { revokedAt: new Date() },
+        },
       )
       .exec();
   }
@@ -195,7 +211,7 @@ export class AuthService {
 
   private createDevice(
     userId: Types.ObjectId,
-    dto: LoginDto,
+    dto: DeviceInfo,
   ): Promise<DeviceDocument> {
     return this.devices.create({
       userId,
@@ -207,7 +223,7 @@ export class AuthService {
 
   private async touchDevice(
     userId: Types.ObjectId,
-    dto: LoginDto,
+    dto: DeviceInfo,
   ): Promise<DeviceDocument> {
     // A fresh login revives a device that was logged out, otherwise one accidental
     // sign-out would permanently lock the phone out.

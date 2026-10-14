@@ -66,7 +66,9 @@ async function main() {
     }
 
     if (!(await users.create(email, password))) {
-      throw new Error(`Could not create ${email} - the email is already registered.`);
+      throw new Error(
+        `Could not create ${email} - the email is already registered.`,
+      );
     }
     console.log(`Created ${email}.`);
   } finally {
