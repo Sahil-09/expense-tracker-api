@@ -22,7 +22,8 @@ function optionalInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw === '') return fallback;
   const value = Number(raw);
-  if (!Number.isInteger(value)) throw new Error(`Env var ${name} must be an integer`);
+  if (!Number.isInteger(value))
+    throw new Error(`Env var ${name} must be an integer`);
   return value;
 }
 

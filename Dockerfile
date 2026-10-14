@@ -2,7 +2,8 @@
 FROM node:24-alpine AS build
 RUN npm install -g pnpm
 WORKDIR /app
-COPY package.json pnpm-lock.yaml* ./
+ENV CI=true
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* ./
 RUN pnpm install --frozen-lockfile
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
 COPY src ./src
@@ -12,7 +13,8 @@ FROM node:24-alpine
 RUN npm install -g pnpm
 WORKDIR /app
 ENV NODE_ENV=production
-COPY package.json pnpm-lock.yaml* ./
+ENV CI=true
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* ./
 RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 COPY --from=build /app/dist ./dist
 # Runs unprivileged: the image has nothing that needs root, and this is a box holding

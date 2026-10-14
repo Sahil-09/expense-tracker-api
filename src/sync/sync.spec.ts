@@ -6,6 +6,7 @@ import { Model, Types } from 'mongoose';
 import request from 'supertest';
 
 import { AuthModule } from '../auth/auth.module';
+import { Device, DeviceSchema } from '../devices/device.schema';
 import { AuthService } from '../auth/auth.service';
 import { Budget, BudgetDocument, BudgetSchema } from './budget.schema';
 import { SyncResponse } from './dto';
@@ -59,6 +60,7 @@ describe('POST /sync', () => {
           { name: Expense.name, schema: ExpenseSchema },
           { name: Budget.name, schema: BudgetSchema },
           { name: Exclusion.name, schema: ExclusionSchema },
+          { name: Device.name, schema: DeviceSchema },
         ]),
         UsersModule,
         AuthModule,
@@ -213,6 +215,59 @@ describe('POST /sync', () => {
       201,
     );
     expect(out.body.expenses[0].deletedAt).toEqual(expect.any(Number));
+    expect(await expenses().countDocuments()).toBe(1);
+  });
+
+  // The regression this guards: every tombstone carries the same empty dedupeKey, so the
+  // duplicate check used to match the *previous* tombstone and drop every delete after
+  // the first — on every device, on every sync, forever.
+  it('propagates a second delete instead of calling it a duplicate', async () => {
+    await post(
+      {
+        deviceId: 'phone-a',
+        expenses: [
+          expense({ clientId: 'gone-1', dedupeKey: 'k1' }),
+          expense({ clientId: 'gone-2', dedupeKey: 'k2' }),
+        ],
+      },
+      a,
+    ).expect(201);
+
+    const out = await post(
+      {
+        deviceId: 'phone-a',
+        expenses: [
+          expense({ clientId: 'gone-1', dedupeKey: '', deleted: true }),
+          expense({ clientId: 'gone-2', dedupeKey: '', deleted: true }),
+        ],
+      },
+      a,
+    ).expect(201);
+
+    expect(out.body.duplicates).toEqual({});
+    expect(await expenses().countDocuments({ deletedAt: { $ne: null } })).toBe(
+      2,
+    );
+
+    const other = await post({ deviceId: 'phone-b', cursor: null }, b).expect(
+      201,
+    );
+    const tombstoned = other.body.expenses as {
+      clientId: string;
+      deletedAt: number | null;
+    }[];
+    expect(tombstoned.filter((e) => e.deletedAt !== null)).toHaveLength(2);
+  });
+
+  it('still collapses two phones capturing the same SMS', async () => {
+    await post(
+      { deviceId: 'phone-a', expenses: [expense({ clientId: 'from-a' })] },
+      a,
+    ).expect(201);
+    await post(
+      { deviceId: 'phone-b', expenses: [expense({ clientId: 'from-b' })] },
+      b,
+    ).expect(201);
     expect(await expenses().countDocuments()).toBe(1);
   });
 

@@ -64,8 +64,17 @@ export const ExpenseSchema = SchemaFactory.createForClass(Expense);
 
 // Cross-device identity: the same row, whatever each phone calls it locally.
 ExpenseSchema.index({ userId: 1, clientId: 1 }, { unique: true });
+
 // Idempotent re-push. Mirrors the local INSERT OR IGNORE in ADR-003 so re-scanning the
 // same inbox cannot double-post on the server either.
-ExpenseSchema.index({ userId: 1, dedupeKey: 1 }, { unique: true });
+//
+// Partial, and that is load-bearing rather than cosmetic. A tombstone carries no message
+// text, so every one of them has the same empty dedupeKey — under a full unique index the
+// second delete on a device is rejected as a duplicate key and the whole sync 500s.
+ExpenseSchema.index(
+  { userId: 1, dedupeKey: 1 },
+  { unique: true, partialFilterExpression: { deletedAt: null } },
+);
+
 // Cursor pulls.
 ExpenseSchema.index({ userId: 1, updatedAt: 1 });

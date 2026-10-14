@@ -44,23 +44,45 @@ export class AuthService {
     const device = dto.deviceId
       ? await this.touchDevice(userId, dto)
       : await this.createDevice(userId, dto);
-    return this.issue(userId, device);
+    const refreshToken = randomUUID();
+    device.refreshTokenHash = tokenHash(refreshToken);
+    device.refreshTokenExpiresAt = this.refreshExpiry();
+    device.lastSeenAt = new Date();
+    await device.save();
+    return this.session(device, refreshToken);
   }
 
-  /** Rotating: the presented token is replaced as the new one is minted. */
+  /**
+   * Rotating, and atomic.
+   *
+   * The lookup that swaps the hash is also the check, so two requests carrying the same
+   * token cannot both win: the second finds nothing left to match and is rejected. A
+   * read-then-write leaves a window where both read the same document and the last save
+   * silently invalidates the token the other one just handed the client.
+   */
   async refresh(refreshToken: string) {
+    const rotated = randomUUID();
     const device = await this.devices
-      .findOne({ refreshTokenHash: tokenHash(refreshToken) })
+      .findOneAndUpdate(
+        {
+          refreshTokenHash: tokenHash(refreshToken),
+          revokedAt: null,
+          refreshTokenExpiresAt: { $gt: new Date() },
+        },
+        {
+          $set: {
+            refreshTokenHash: tokenHash(rotated),
+            refreshTokenExpiresAt: this.refreshExpiry(),
+            lastSeenAt: new Date(),
+          },
+        },
+        { new: true },
+      )
       .exec();
 
-    const expired =
-      !device?.refreshTokenExpiresAt ||
-      device.refreshTokenExpiresAt.getTime() <= Date.now();
-    if (!device || device.revokedAt || expired) {
-      throw new UnauthorizedException('Refresh token is not valid');
-    }
+    if (!device) throw new UnauthorizedException('Refresh token is not valid');
 
-    return this.issue(device.userId, device);
+    return this.session(device, rotated);
   }
 
   /** Idempotent: a token that is already gone is a successful logout. */
@@ -76,29 +98,29 @@ export class AuthService {
       .exec();
   }
 
-  private async issue(userId: Types.ObjectId, device: DeviceDocument) {
-    const payload: AccessPayload = {
-      sub: userId.toString(),
-      deviceId: device.deviceId,
-    };
-    const accessToken = this.jwt.sign(payload, {
-      secret: env.jwtSecret,
-      expiresIn: env.accessTtl,
-    });
-
-    const refreshToken = randomUUID();
-    const expiresAt = new Date(Date.now() + env.refreshTtlDays * 86_400_000);
-    device.refreshTokenHash = tokenHash(refreshToken);
-    device.refreshTokenExpiresAt = expiresAt;
-    device.lastSeenAt = new Date();
-    await device.save();
-
+  /**
+   * The wire shape. `expiresIn` is in **seconds**, which is what the JWT spec and every
+   * JWT library use. Sending milliseconds here makes a client that trusts the number
+   * believe a 15-minute token is good for ten days.
+   */
+  private session(device: DeviceDocument, refreshToken: string) {
+    const accessToken = this.jwt.sign(
+      {
+        sub: device.userId.toString(),
+        deviceId: device.deviceId,
+      } satisfies AccessPayload,
+      { secret: env.jwtSecret, expiresIn: env.accessTtl },
+    );
     return {
       accessToken,
       refreshToken,
-      expiresIn: env.accessTtl,
+      expiresIn: Math.round(env.accessTtl / 1000),
       deviceId: device.deviceId,
     };
+  }
+
+  private refreshExpiry(): Date {
+    return new Date(Date.now() + env.refreshTtlDays * 86_400_000);
   }
 
   private createDevice(

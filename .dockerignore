@@ -1,4 +1,7 @@
 node_modules
+dist
+coverage
+backups
 .git
 .gitignore
 .dockerignore
@@ -7,3 +10,5 @@ node_modules
 Dockerfile
 docker-compose.yml
 *.log
+*.ps1
+ops

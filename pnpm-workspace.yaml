@@ -1,6 +1,10 @@
-# argon2 is a native module and refuses to load without its install script.
+# Packages allowed to run their install scripts.
+#
+# pnpm 11 aborts the whole install (ERR_PNPM_IGNORED_BUILDS) if anything here is written
+# as `set this to true or false`, which is what pnpm puts in place when it first meets an
+# unlisted package. Every entry must be a real boolean.
 allowBuilds:
-  '@parcel/watcher': set this to true or false
   argon2: true
   mongodb-memory-server: true
   unrs-resolver: true
+  "@parcel/watcher": true

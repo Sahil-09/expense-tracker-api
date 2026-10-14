@@ -1,11 +1,17 @@
 /**
  * Creates the single account. Run once:
  *
- *   npm run bootstrap-user -- --email you@example.com --password '...'
+ *   npm run bootstrap-user -- --email you@example.com
  *
- * A standalone script rather than a seeded env value, so the password never sits in a file
- * that gets committed, and so re-running it is a deliberate act. Exists because there is no
- * signup route — see ADR-004.
+ * The password is read from stdin, not from `--password`, because an argument shows up in
+ * `ps` output and in shell history on the VPS — which is the same leak as committing it.
+ * Passing it twice on a terminal is not supported; a pipe or a heredoc is:
+ *
+ *   npm run bootstrap-user -- --email you@example.com <<< 'the password'
+ *
+ * A standalone script rather than a seeded env value, so the password never sits in a
+ * file that gets committed, and so re-running it is a deliberate act. There is no signup
+ * route — see ADR-004.
  */
 import 'reflect-metadata';
 
@@ -25,9 +31,19 @@ function arg(name: string): string {
   return value;
 }
 
+/** No readline: stdin is a pipe, not a TTY, so one read is the whole thing. */
+async function readPassword(): Promise<string> {
+  let out = '';
+  process.stdin.setEncoding('utf8');
+  for await (const chunk of process.stdin) out += chunk;
+  const trimmed = out.trim();
+  if (!trimmed) throw new Error('No password on stdin');
+  return trimmed;
+}
+
 async function main() {
   const email = arg('email');
-  const password = arg('password');
+  const password = await readPassword();
 
   const app = await NestFactory.createApplicationContext(AppModule, {
     logger: ['error', 'warn'],
@@ -37,6 +53,10 @@ async function main() {
   const model = app.get<Model<UserDocument>>(getModelToken(User.name));
 
   try {
+    // Index creation is lazy in Mongo, so build them on every run rather than only when
+    // the account is new — otherwise re-running after adding an index does nothing.
+    await model.syncIndexes();
+
     const existing = await users.findByEmail(email);
     if (existing) {
       // Replace rather than fail: the common case is re-running this after a password
@@ -49,10 +69,6 @@ async function main() {
 
     await users.create(email, password);
     console.log(`Created ${email}.`);
-
-    // Index creation is lazy in Mongo, so create them now rather than letting the first
-    // duplicate silently succeed because the unique index was not built yet.
-    await model.syncIndexes();
   } finally {
     await app.close();
   }

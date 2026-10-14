@@ -78,7 +78,24 @@ Invoke-RestMethod "$base/sync" -Method Post -ContentType 'application/json' -Hea
   -Body (@{ deviceId='phone-a'; expenses=@($del) } | ConvertTo-Json -Depth 5) | Out-Null
 $r7 = Invoke-RestMethod "$base/sync" -Method Post -ContentType 'application/json' -Headers $authB `
   -Body (@{ deviceId='phone-b'; cursor=$null } | ConvertTo-Json)
-Check "deletedAt present" ($r7.expenses[0].deletedAt -is [long] -or $r7.expenses[0].deletedAt -is [int] -or $r7.expenses[0].deletedAt -gt 0) 'True'
+Check "deletedAt present" ($r7.expenses[0].deletedAt -gt 0) 'True'
+
+# The regression this guards: every tombstone carries the same empty dedupeKey, so the
+# duplicate check used to match the previous tombstone and silently drop every delete
+# after the first. Testing one delete hides it completely.
+$d1 = $expense.Clone(); $d1.clientId = 'aaaaaaaa-1111-4111-8111-111111111111'; $d1.dedupeKey = 'dd1'; $d1.deleted = $true
+$d2 = $expense.Clone(); $d2.clientId = 'bbbbbbbb-2222-4222-8222-222222222222'; $d2.dedupeKey = 'dd2'; $d2.deleted = $true
+# `{}` comes back from ConvertFrom-Json as $null, so compare the raw JSON rather than
+# counting properties on something that may not be an object at all.
+$r7b = Invoke-RestMethod "$base/sync" -Method Post -ContentType 'application/json' -Headers $authA `
+  -Body (@{ deviceId='phone-a'; expenses=@($d1,$d2) } | ConvertTo-Json -Depth 5)
+Check "second delete not called a duplicate" ($r7b.duplicates | ConvertTo-Json -Compress) '{}'
+
+$r7c = Invoke-RestMethod "$base/sync" -Method Post -ContentType 'application/json' -Headers $authB `
+  -Body (@{ deviceId='phone-b'; cursor=$null } | ConvertTo-Json)
+# Only the two new ones: step 9 already tombstoned c1 on this same database.
+Check "phone-b sees both new tombstones" (
+  @($r7c.expenses | Where-Object { $_.deletedAt -gt 0 -and $_.clientId -in @('aaaaaaaa-1111-4111-8111-111111111111','bbbbbbbb-2222-4222-8222-222222222222') }).Count) 2
 
 Write-Host "`n10. refresh rotates, logout revokes" -ForegroundColor Cyan
 $r8 = Invoke-RestMethod "$base/auth/refresh" -Method Post -ContentType 'application/json' -Body (@{ refreshToken=$a.refreshToken } | ConvertTo-Json)

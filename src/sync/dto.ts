@@ -19,6 +19,11 @@ import { Type } from 'class-transformer';
  * `updatedAt` on the wire: the server stamps that itself, and using the phone's clock for
  * ordering is what makes two devices disagree.
  */
+/**
+ * category, dedupeKey and source are not required to be non-empty. A tombstone carries no
+ * message text, so the phone sends blank strings for all three — and rejecting them meant
+ * the whole sync came back 400 and *no delete ever reached the server*.
+ */
 export class ExpenseChange {
   @IsString()
   @IsNotEmpty()
@@ -33,7 +38,6 @@ export class ExpenseChange {
   merchant?: string | null;
 
   @IsString()
-  @IsNotEmpty()
   category: string;
 
   @IsInt()
@@ -47,11 +51,9 @@ export class ExpenseChange {
   rawSms: string;
 
   @IsString()
-  @IsNotEmpty()
   dedupeKey: string;
 
   @IsString()
-  @IsNotEmpty()
   source: string;
 
   @IsBoolean()

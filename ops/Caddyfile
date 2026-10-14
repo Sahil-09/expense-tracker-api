@@ -35,7 +35,8 @@ sync.example.com {
 	log {
 		output file /var/log/caddy/sync-access.log
 		format json
-		# Queries carry no secrets, but a body would be bank SMS. Never log one.
-		level ERROR
+		# Request metadata only — the logger never writes a body at any level, so this cannot
+	# capture bank SMS. INFO rather than ERROR, or a burst of 401s leaves no trace.
+		level INFO
 	}
 }

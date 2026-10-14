@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 
 import { SafeLogger } from '../logging/safe-logger';
+import { Device, DeviceDocument } from '../devices/device.schema';
 import { Budget, BudgetDocument } from './budget.schema';
 import {
   BudgetChange,
@@ -30,6 +31,7 @@ export class SyncService {
     @InjectModel(Budget.name) private readonly budgets: Model<BudgetDocument>,
     @InjectModel(Exclusion.name)
     private readonly exclusions: Model<ExclusionDocument>,
+    @InjectModel(Device.name) private readonly devices: Model<DeviceDocument>,
   ) {}
 
   /**
@@ -53,7 +55,13 @@ export class SyncService {
     // call falls after the cursor and is delivered next time rather than being lost
     // between the two.
     const cursor = new Date();
-    const since = req.cursor ? new Date(req.cursor) : new Date(0);
+
+    // Clamped to now. A cursor the client somehow stored in the future would otherwise
+    // match nothing at all and silently stop every update on that device, with no error
+    // and no way back except clearing its data.
+    const since = req.cursor
+      ? new Date(Math.min(new Date(req.cursor).getTime(), Date.now()))
+      : new Date(0);
 
     const [expenses, budgets, exclusions] = await Promise.all([
       this.pullExpenses(userId, since, pushed.expenses),
@@ -66,6 +74,16 @@ export class SyncService {
         `pulled ${expenses.length}/${budgets.length}/${exclusions.length}, ` +
         `${Object.keys(duplicates).length} duplicate(s)`,
     );
+
+    // The whole reason the devices collection exists. Fire and forget: one update against
+    // a request that already made hundreds of database calls, and a device that has been
+    // offline for a month should not fail its sync over it.
+    void this.devices
+      .updateOne(
+        { userId, deviceId: req.deviceId },
+        { $set: { lastSeenAt: new Date() } },
+      )
+      .catch(() => {});
 
     return {
       cursor: cursor.toISOString(),
@@ -98,50 +116,79 @@ export class SyncService {
     changes: ExpenseChange[],
     duplicates: Record<string, string>,
   ): Promise<string[]> {
-    const written: string[] = [];
+    if (changes.length === 0) return [];
 
-    for (const c of changes) {
-      // Another row already holds this dedupeKey: the same SMS scanned on two phones.
-      // Recording the clash lets the phone drop its copy rather than ending up with one
-      // expense counted twice — which is exactly what the unique index would otherwise
-      // turn into a 500.
-      const clash = await this.expenses
-        .findOne({
+    // Every clash in one query rather than one per row. A first sync of a year of history
+    // is a few hundred rows, and two awaited round trips each is a sync that takes seconds
+    // for no reason.
+    //
+    // `deletedAt: null` mirrors the partial unique index exactly: tombstones share one
+    // constant dedupeKey and must never be treated as owning it.
+    const held = new Map<string, string>();
+    const live = changes.filter((c) => !c.deleted);
+    if (live.length > 0) {
+      const rows = await this.expenses
+        .find({
           userId,
-          dedupeKey: c.dedupeKey,
-          clientId: { $ne: c.clientId },
+          deletedAt: null,
+          dedupeKey: { $in: live.map((c) => c.dedupeKey) },
         })
-        .select('clientId')
+        .select('clientId dedupeKey')
         .lean()
         .exec();
-      if (clash) {
-        duplicates[c.clientId] = clash.clientId;
-        continue;
+      for (const r of rows)
+        if (!held.has(r.dedupeKey)) held.set(r.dedupeKey, r.clientId);
+    }
+
+    const written: string[] = [];
+    const ops: Parameters<typeof this.expenses.bulkWrite>[0] = [];
+
+    for (const c of changes) {
+      if (!c.deleted) {
+        // Another row already holds this dedupeKey: the same SMS scanned on two phones.
+        // Recording the clash lets the phone drop its copy rather than ending up with one
+        // expense counted twice — which is exactly what the unique index would otherwise
+        // turn into a 500.
+        //
+        // Skipped for tombstones. A tombstone carries no message text, so its dedupeKey is
+        // a constant — checking it would make every delete after the first look like a
+        // duplicate of the previous one, and those deletes would be dropped forever.
+        const owner = held.get(c.dedupeKey);
+        if (owner !== undefined && owner !== c.clientId) {
+          duplicates[c.clientId] = owner;
+          continue;
+        }
+        held.set(c.dedupeKey, c.clientId);
       }
 
-      await this.expenses.updateOne(
-        { userId, clientId: c.clientId },
-        {
-          $set: {
-            amountPaise: c.amountPaise,
-            merchant: c.merchant ?? null,
-            category: c.category,
-            txnAt: new Date(c.txnAt),
-            note: c.note ?? null,
-            rawSms: c.rawSms,
-            dedupeKey: c.dedupeKey,
-            source: c.source,
-            isExpense: c.isExpense,
-            isDue: c.isDue,
-            // A delete is a tombstone, so the other phone learns about it and the row
-            // stays addressable to the cursor.
-            deletedAt: c.deleted ? new Date() : null,
+      ops.push({
+        updateOne: {
+          filter: { userId, clientId: c.clientId },
+          update: {
+            $set: {
+              amountPaise: c.amountPaise,
+              merchant: c.merchant ?? null,
+              category: c.category,
+              txnAt: new Date(c.txnAt),
+              note: c.note ?? null,
+              rawSms: c.rawSms,
+              dedupeKey: c.dedupeKey,
+              source: c.source,
+              isExpense: c.isExpense,
+              isDue: c.isDue,
+              // A delete is a tombstone, so the other phone learns about it and the row
+              // stays addressable to the cursor.
+              deletedAt: c.deleted ? new Date() : null,
+            },
           },
+          upsert: true,
         },
-        { upsert: true },
-      );
+      });
       written.push(c.clientId);
     }
+
+    // Unordered: one rejected row must not abandon the rest of the batch.
+    if (ops.length > 0) await this.expenses.bulkWrite(ops, { ordered: false });
 
     return written;
   }
