@@ -66,4 +66,8 @@ export class SafeLogger extends ConsoleLogger {
   override verbose(message: unknown, ...rest: unknown[]): void {
     super.verbose(redact(message), ...rest.map((r) => redact(r) as string));
   }
+
+  override fatal(message: unknown, ...rest: unknown[]): void {
+    super.fatal(redact(message), ...rest.map((r) => redact(r) as string));
+  }
 }

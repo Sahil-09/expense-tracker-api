@@ -1,4 +1,5 @@
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsISO8601,
@@ -103,18 +104,21 @@ export class SyncRequest {
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
   @ValidateNested({ each: true })
   @Type(() => ExpenseChange)
   expenses?: ExpenseChange[];
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
   @ValidateNested({ each: true })
   @Type(() => BudgetChange)
   budgets?: BudgetChange[];
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
   @ValidateNested({ each: true })
   @Type(() => ExclusionChange)
   exclusions?: ExclusionChange[];

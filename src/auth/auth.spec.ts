@@ -56,6 +56,11 @@ describe('auth', () => {
     expect(res.body.accessToken).toBeTruthy();
     expect(res.body.refreshToken).toBeTruthy();
     expect(res.body.deviceId).toBe('phone-a');
+
+    const payload = JSON.parse(
+      Buffer.from(res.body.accessToken.split('.')[1], 'base64').toString(),
+    );
+    expect(payload.exp - payload.iat).toBe(900); // 15 minutes in seconds
   });
 
   it('gives a missing account and a wrong password the same answer', async () => {

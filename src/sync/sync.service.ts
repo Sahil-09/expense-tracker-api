@@ -63,11 +63,25 @@ export class SyncService {
       ? new Date(Math.min(new Date(req.cursor).getTime(), Date.now()))
       : new Date(0);
 
-    const [expenses, budgets, exclusions] = await Promise.all([
+    const [expensesPull, budgetsPull, exclusionsPull] = await Promise.all([
       this.pullExpenses(userId, since, pushed.expenses),
       this.pullBudgets(userId, since, pushed.budgets),
       this.pullExclusions(userId, since, pushed.exclusions),
     ]);
+
+    const expenses = expensesPull.items;
+    const budgets = budgetsPull.items;
+    const exclusions = exclusionsPull.items;
+
+    // Advance cursor safely: to prevent data loss when pagination cuts off some collections,
+    // we take the minimum of the lastUpdatedAt of any truncated collection (length >= PAGE),
+    // or the current start of the sync (cursor).
+    const safeLimits = [
+      expenses.length >= PAGE && expensesPull.lastUpdatedAt ? expensesPull.lastUpdatedAt : cursor,
+      budgets.length >= PAGE && budgetsPull.lastUpdatedAt ? budgetsPull.lastUpdatedAt : cursor,
+      exclusions.length >= PAGE && exclusionsPull.lastUpdatedAt ? exclusionsPull.lastUpdatedAt : cursor,
+    ];
+    const nextCursor = new Date(Math.min(...safeLimits.map((d) => d.getTime())));
 
     this.log.log(
       `pushed ${pushed.expenses.length}/${pushed.budgets.length}/${pushed.exclusions.length}, ` +
@@ -86,7 +100,7 @@ export class SyncService {
       .catch(() => {});
 
     return {
-      cursor: cursor.toISOString(),
+      cursor: nextCursor.toISOString(),
       hasMore:
         expenses.length >= PAGE ||
         budgets.length >= PAGE ||
@@ -188,7 +202,14 @@ export class SyncService {
     }
 
     // Unordered: one rejected row must not abandon the rest of the batch.
-    if (ops.length > 0) await this.expenses.bulkWrite(ops, { ordered: false });
+    if (ops.length > 0) {
+      try {
+        await this.expenses.bulkWrite(ops, { ordered: false });
+      } catch (e) {
+        const isDup = typeof e === 'object' && e !== null && (e as any).code === 11000;
+        if (!isDup) throw e;
+      }
+    }
 
     return written;
   }
@@ -234,7 +255,7 @@ export class SyncService {
     userId: Types.ObjectId,
     since: Date,
     exclude: string[],
-  ): Promise<ExpenseRow[]> {
+  ): Promise<{ items: ExpenseRow[]; lastUpdatedAt?: Date }> {
     const rows = await this.expenses
       .find({
         userId,
@@ -246,7 +267,7 @@ export class SyncService {
       .lean()
       .exec();
 
-    return rows.map((r) => ({
+    const items = rows.map((r) => ({
       clientId: r.clientId,
       amountPaise: r.amountPaise,
       merchant: r.merchant ?? null,
@@ -260,13 +281,18 @@ export class SyncService {
       isDue: r.isDue,
       deletedAt: ms(r.deletedAt),
     }));
+
+    return {
+      items,
+      lastUpdatedAt: rows.length > 0 ? (rows[rows.length - 1].updatedAt as Date) : undefined,
+    };
   }
 
   private async pullBudgets(
     userId: Types.ObjectId,
     since: Date,
     exclude: string[],
-  ) {
+  ): Promise<{ items: { category: string; monthlyPaise: number; deletedAt: number | null }[]; lastUpdatedAt?: Date }> {
     const rows = await this.budgets
       .find({
         userId,
@@ -277,18 +303,22 @@ export class SyncService {
       .limit(PAGE)
       .lean()
       .exec();
-    return rows.map((r) => ({
+    const items = rows.map((r) => ({
       category: r.category,
       monthlyPaise: r.monthlyPaise,
       deletedAt: ms(r.deletedAt),
     }));
+    return {
+      items,
+      lastUpdatedAt: rows.length > 0 ? (rows[rows.length - 1].updatedAt as Date) : undefined,
+    };
   }
 
   private async pullExclusions(
     userId: Types.ObjectId,
     since: Date,
     exclude: string[],
-  ) {
+  ): Promise<{ items: { merchant: string; deletedAt: number | null }[]; lastUpdatedAt?: Date }> {
     const rows = await this.exclusions
       .find({
         userId,
@@ -299,9 +329,13 @@ export class SyncService {
       .limit(PAGE)
       .lean()
       .exec();
-    return rows.map((r) => ({
+    const items = rows.map((r) => ({
       merchant: r.merchant,
       deletedAt: ms(r.deletedAt),
     }));
+    return {
+      items,
+      lastUpdatedAt: rows.length > 0 ? (rows[rows.length - 1].updatedAt as Date) : undefined,
+    };
   }
 }

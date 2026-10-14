@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { Model, Types } from 'mongoose';
 import request from 'supertest';
+import { json } from 'express';
 
 import { AuthModule } from '../auth/auth.module';
 import { Device, DeviceSchema } from '../devices/device.schema';
@@ -70,6 +71,7 @@ describe('POST /sync', () => {
     }).compile();
 
     app = moduleRef.createNestApplication();
+    app.use(json({ limit: '4mb' }));
     app.useGlobalPipes(
       new ValidationPipe({
         whitelist: true,
@@ -176,6 +178,30 @@ describe('POST /sync', () => {
       b,
     ).expect(201);
     expect(next.body.expenses).toHaveLength(0);
+  });
+
+  it('paginates correctly when exceeding PAGE limit and does not lose data', async () => {
+    // Push 501 items in batches of 100 with a tiny sleep to ensure they get staggered updatedAt timestamps in MongoDB
+    for (let batchIdx = 0; batchIdx < 5; batchIdx++) {
+      const batch: any[] = [];
+      for (let i = 0; i < 100; i++) {
+        const id = batchIdx * 100 + i;
+        batch.push(expense({ clientId: `bulk-${id}`, dedupeKey: `key-${id}` }));
+      }
+      await post({ deviceId: 'phone-a', expenses: batch }, a).expect(201);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // Push the 501st item
+    await post({ deviceId: 'phone-a', expenses: [expense({ clientId: 'bulk-500', dedupeKey: 'key-500' })] }, a).expect(201);
+
+    const page1 = await post({ deviceId: 'phone-b', cursor: null }, b).expect(201);
+    expect(page1.body.expenses).toHaveLength(500);
+    expect(page1.body.hasMore).toBe(true);
+
+    const page2 = await post({ deviceId: 'phone-b', cursor: page1.body.cursor }, b).expect(201);
+    expect(page2.body.expenses).toHaveLength(1);
+    expect(page2.body.expenses[0].clientId).toBe('bulk-500');
+    expect(page2.body.hasMore).toBe(false);
   });
 
   it('re-pushing the same expense is idempotent, not a second row', async () => {

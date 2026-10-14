@@ -162,7 +162,7 @@ export class AuthService {
         sub: device.userId.toString(),
         deviceId: device.deviceId,
       } satisfies AccessPayload,
-      { secret: env.jwtSecret, expiresIn: env.accessTtl },
+      { secret: env.jwtSecret, expiresIn: Math.round(env.accessTtl / 1000) },
     );
     return {
       accessToken,
@@ -237,15 +237,11 @@ export class AuthService {
       consumedAt: null,
     });
 
-    try {
-      await sendPasswordResetEmail(user.email, code);
-    } catch (e) {
-      // Fail open. The response has to be a 200 whether or not the account exists, and a
-      // 500 here would turn every Resend outage into a signal that a given address is
-      // registered. The row stays: the code is still valid, and the request can simply
-      // be made again once the cooldown passes.
+    // Fire and forget so we do not wait for the external mail API round trip,
+    // which would otherwise act as a timing oracle for account enumeration.
+    sendPasswordResetEmail(user.email, code).catch((e) => {
       this.log.error('Could not send a password reset email', e);
-    }
+    });
   }
 
   /**
