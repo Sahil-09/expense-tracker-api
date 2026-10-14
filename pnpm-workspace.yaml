@@ -1,0 +1,6 @@
+# argon2 is a native module and refuses to load without its install script.
+allowBuilds:
+  '@parcel/watcher': set this to true or false
+  argon2: true
+  mongodb-memory-server: true
+  unrs-resolver: true

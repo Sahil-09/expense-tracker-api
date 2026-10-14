@@ -1,0 +1,122 @@
+# expense-tracker-api
+
+Private sync backend for the Expense Tracker app. NestJS + MongoDB, self-hosted, one account.
+
+The app stays offline-first. This is a sync *peer*, not a dependency — if this box is down,
+slow or gone, the app is indistinguishable from normal use.
+
+## Running it
+
+```bash
+cp .env.example .env          # then fill in two different JWT secrets
+docker compose up -d --build
+npm run bootstrap-user -- --email you@example.com --password '...'
+```
+
+`GET /health` returns `{"status":"ok"}` and nothing else.
+
+## Tests
+
+```bash
+pnpm test          # contract tests against a real mongod (mongodb-memory-server)
+npx tsc --noEmit
+```
+
+## The API
+
+| | |
+|---|---|
+| `GET /health` | Liveness only. No version, no uptime, no DB round trip. |
+| `POST /auth/login` | `{ email, password, deviceId?, deviceName?, platform? }` |
+| `POST /auth/refresh` | `{ refreshToken }` — rotating; the old one stops working |
+| `POST /auth/logout` | `{ refreshToken }` — idempotent |
+| `POST /sync` | `{ deviceId, cursor?, expenses[], budgets[], exclusions[] }` |
+
+There is no signup route. The account is created once by the bootstrap script.
+
+## How sync works
+
+One cursor-based endpoint, not CRUD per resource.
+
+- **Identity is `clientId`**, a UUID minted on the phone at insert time. The phone's local
+  `id` is an autoincrement integer and two devices each mint id 5 for different expenses,
+  so syncing on that would silently write one phone's merchant over the other's row.
+- **Last write wins**, and it falls out of the server stamping `updatedAt` from its own
+  clock on every write. A phone cannot set `updatedAt` — the DTO rejects it. A phone with a
+  wrong clock therefore cannot win.
+- **Idempotent.** Push is an upsert on `(userId, clientId)`, so re-pushing a row rewrites
+  it with identical values. `(userId, dedupeKey)` is also unique, which makes a re-scanned
+  SMS a no-op; when two devices capture the *same* SMS, the second push is reported in
+  `duplicates` rather than 500-ing on the index.
+- **Deletes are tombstones.** A row that vanished would break the cursor, so `deletedAt`
+  is set and the row stays.
+- **Echo suppression.** Rows pushed by this request are excluded from its own pull.
+- **A device with no cursor gets its own history back**, which is how a reinstall recovers.
+
+## Layout
+
+```
+src/
+  config/env.ts          validated once at boot; a missing secret stops the process
+  logging/               SafeLogger — rawSms is never logged
+  health/
+  users/                 schema, service, bootstrap-user script
+  devices/               one doc per phone; bounds a leaked token's blast radius
+  auth/                  argon2id, JWT, rotating refresh tokens, hand-rolled guard
+  sync/                  the one endpoint, its schemas, and the contract tests
+```
+
+## Security notes
+
+- Argon2id at the OWASP baseline (19 MiB / 2 passes).
+- Refresh tokens stored as SHA-256 digests. They are random values, so there is nothing to
+  brute-force; a database leak cannot be replayed as a token.
+- `rawSms` is never logged — `SafeLogger` redacts by key name, so a new call site cannot
+  leak a message body by accident.
+- Helmet, an explicit CORS allowlist, a 2 MB body cap, and a global `ValidationPipe` with
+  `forbidNonWhitelisted`.
+- `/health` is public and says nothing.
+
+## Deploying
+
+One box, two containers, TLS in front.
+
+```bash
+cp .env.example .env
+# MONGO_USER, MONGO_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET — four openssl rand -hex 32
+docker compose up -d --build
+npm run bootstrap-user -- --email you@example.com --password '...'
+sudo cp ops/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+```
+
+- The API is published to `127.0.0.1:3000` only. Caddy is the only thing that reaches it.
+- Mongo auth is on and its port is never published. The healthcheck carries credentials,
+  because an unauthenticated ping reports a dead database.
+- Firewall: 22, 80, 443. Nothing else.
+
+### Backups
+
+```bash
+ops/backup.sh          # nightly via cron
+ops/restore-test.sh    # restores into a throwaway container and checks it
+```
+
+**Run the restore test on a schedule, not once.** It compares row counts *and* index specs
+against the live database, because a restore that brings back the rows but not the unique
+indexes produces a database that looks healthy and quietly accepts the same bank SMS
+twice. It never touches the live database or the `mongo-data` volume.
+
+Sync `backups/` off the box. A backup on the same disk as the database is not a backup.
+
+### Verified, and verified how
+
+`verify-ops.ps1` runs the exact mongo commands both scripts use, against two authenticated
+mongods — because the bash scripts themselves cannot run on Windows. It caught four real
+problems: MongoDB 8 dropped the positional `mongodump <db>` form, `mongorestore` deprecates
+`--db` in favour of `--nsInclude`, `getIndexes()` throws on a collection that does not
+exist, and PowerShell's `>` silently corrupts a binary gzip stream.
+
+## Not built yet
+
+A Caddyfile and backup scripts are written but **have never run on a Linux host** — there
+is no VPS here. First deploy is where those get their real test.

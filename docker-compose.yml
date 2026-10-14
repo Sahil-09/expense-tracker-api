@@ -1,0 +1,56 @@
+services:
+  mongo:
+    image: mongo:8
+    restart: unless-stopped
+    environment:
+      # Auth on. The root user is the only one, and MONGO_URI carries it.
+      #
+      # A second, database-scoped app user would be tidier, but on this box it is one more
+      # secret to store and rotate for no gain: the port is never published to the host,
+      # so the only way in is from inside the compose network.
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:?set MONGO_USER in .env}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?set MONGO_PASSWORD in .env}
+      MONGO_INITDB_DATABASE: expense-tracker
+    volumes:
+      - mongo-data:/data/db
+    # Not published to the host. Only the API reaches it, over the compose network.
+    expose:
+      - '27017'
+    healthcheck:
+      # Auth is on, so the ping needs credentials or it reports a failure that looks like
+      # a dead database.
+      test:
+        [
+          'CMD',
+          'mongosh',
+          '--quiet',
+          '-u',
+          '${MONGO_USER}',
+          '-p',
+          '${MONGO_PASSWORD}',
+          '--authenticationDatabase',
+          'admin',
+          '--eval',
+          'db.adminCommand("ping")',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGO_URI: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/expense-tracker?authSource=admin
+    # Bound to loopback only. Caddy is the only thing that should reach this port, and
+    # it terminates TLS in front of it.
+    ports:
+      - '127.0.0.1:3000:3000'
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  mongo-data:

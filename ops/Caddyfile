@@ -1,0 +1,41 @@
+# Ledger HTTPS termination for expense-tracker-api.
+#
+# The API container is bound to 127.0.0.1, so this is the only way in. Let's Encrypt needs
+# port 80 open for the challenge; nothing else needs to be.
+#
+# Install: copy to /etc/caddy/Caddyfile, `systemctl reload caddy`.
+
+sync.example.com {
+	encode zstd gzip
+
+	# An expense payload carries full bank SMS. A month of history is comfortably under
+	# this; anything larger is a bug or an attack.
+	request_body {
+		max_size 8MB
+	}
+
+	# Do not advertise the server, and do not let Caddy echo back what Nginx once did.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:3000 {
+		# Sync is one request that pushes a batch and pulls a batch. The default 5s read
+		# timeout cuts a large first sync off mid-flight, and the phone would see a
+		# half-applied pull as a failure.
+		transport http {
+			read_timeout 120s
+			write_timeout 120s
+		}
+	}
+
+	log {
+		output file /var/log/caddy/sync-access.log
+		format json
+		# Queries carry no secrets, but a body would be bank SMS. Never log one.
+		level ERROR
+	}
+}
