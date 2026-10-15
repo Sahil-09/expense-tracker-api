@@ -10,7 +10,7 @@ import {
   MaxLength,
   ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 
 /**
  * One changed expense, in the shape the phone holds it.
@@ -97,28 +97,25 @@ export class SyncRequest {
   @MaxLength(64)
   deviceId: string;
 
-  /** Omitted or null on the very first sync, meaning "everything since the beginning". */
+  @Transform(({ value }) => (value === '' ? null : value))
   @IsOptional()
   @IsISO8601()
   cursor?: string | null;
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(500)
   @ValidateNested({ each: true })
   @Type(() => ExpenseChange)
   expenses?: ExpenseChange[];
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(500)
   @ValidateNested({ each: true })
   @Type(() => BudgetChange)
   budgets?: BudgetChange[];
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(500)
   @ValidateNested({ each: true })
   @Type(() => ExclusionChange)
   exclusions?: ExclusionChange[];

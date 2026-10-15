@@ -10,7 +10,7 @@ import { AuthModule } from '../auth/auth.module';
 import { Device, DeviceSchema } from '../devices/device.schema';
 import { AuthService } from '../auth/auth.service';
 import { Budget, BudgetDocument, BudgetSchema } from './budget.schema';
-import { SyncResponse } from './dto';
+import { MAX_PUSH_ROWS, SyncResponse } from './dto';
 import { Exclusion, ExclusionSchema } from './exclusion.schema';
 import { Expense, ExpenseDocument, ExpenseSchema } from './expense.schema';
 import { SyncController } from './sync.controller';
@@ -202,6 +202,23 @@ describe('POST /sync', () => {
     expect(page2.body.expenses).toHaveLength(1);
     expect(page2.body.expenses[0].clientId).toBe('bulk-500');
     expect(page2.body.hasMore).toBe(false);
+  });
+
+  // The phone pushes its whole unsynced backlog in one call, so a first sync of years of
+  // history arrives here as one array well past a single pull page. It has to land whole.
+  it(`accepts a whole backlog of ${MAX_PUSH_ROWS} rows in one push`, async () => {
+    const rows = Array.from({ length: MAX_PUSH_ROWS }, (_, i) =>
+      expense({ clientId: `backlog-${i}`, dedupeKey: `key-${i}` }),
+    );
+    await post({ deviceId: 'phone-a', expenses: rows }, a).expect(201);
+    expect(await expenses().countDocuments()).toBe(MAX_PUSH_ROWS);
+  });
+
+  it('still refuses one row past the push limit', async () => {
+    const rows = Array.from({ length: MAX_PUSH_ROWS + 1 }, (_, i) =>
+      expense({ clientId: `over-${i}`, dedupeKey: `over-key-${i}` }),
+    );
+    await post({ deviceId: 'phone-a', expenses: rows }, a).expect(400);
   });
 
   it('re-pushing the same expense is idempotent, not a second row', async () => {
