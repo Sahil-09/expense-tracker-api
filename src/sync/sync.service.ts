@@ -190,6 +190,7 @@ export class SyncService {
               source: c.source,
               isExpense: c.isExpense,
               isDue: c.isDue,
+              isIncome: c.isIncome ?? false,
               // A delete is a tombstone, so the other phone learns about it and the row
               // stays addressable to the cursor.
               deletedAt: c.deleted ? new Date() : null,
@@ -279,6 +280,7 @@ export class SyncService {
       source: r.source,
       isExpense: r.isExpense,
       isDue: r.isDue,
+      isIncome: r.isIncome ?? false,
       deletedAt: ms(r.deletedAt),
     }));
 

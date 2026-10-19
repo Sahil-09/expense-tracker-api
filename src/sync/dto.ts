@@ -63,6 +63,14 @@ export class ExpenseChange {
   @IsBoolean()
   isDue: boolean;
 
+  /**
+   * Optional so an older phone's payload still validates after the server learns about
+   * income. Absent means false.
+   */
+  @IsOptional()
+  @IsBoolean()
+  isIncome?: boolean;
+
   /** Present means "delete this everywhere"; the row is kept as a tombstone. */
   @IsOptional()
   @IsBoolean()
@@ -133,6 +141,7 @@ export type ExpenseRow = {
   source: string;
   isExpense: boolean;
   isDue: boolean;
+  isIncome: boolean;
   /** Epoch ms of the delete, or null while the row is live. */
   deletedAt: number | null;
 };

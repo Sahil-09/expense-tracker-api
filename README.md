@@ -58,6 +58,7 @@ npx tsc --noEmit
 | `POST /auth/refresh` | `{ refreshToken }` — rotating; the old one stops working |
 | `POST /auth/logout` | `{ refreshToken }` — idempotent |
 | `POST /sync` | `{ deviceId, cursor?, expenses[], budgets[], exclusions[] }` |
+| `POST /sms` | `{ body, receivedAt? }` — raw bank SMS from an iOS Shortcut |
 
 `register` answers 401 when `SIGNUP_CODE` is not configured, so an outsider cannot tell
 whether an operator ever enabled it. The reset routes answer identically for a known and an
@@ -68,6 +69,18 @@ The emailed code is 8 digits, expires after 15 minutes, and is consumed the firs
 works. Only `sha256(userId + ':' + code)` is stored, so it cannot be looked up and re-sent;
 one per address per 60 seconds is allowed, which is a throttle on the inbox rather than on
 the guessing.
+
+### SMS without the app
+
+`POST /sms` takes a raw bank SMS body, parses it with the same rules as the phone
+(`src/sms/parse.ts`), dedupes on `(body, day)`, and writes an ordinary expense row that the
+next `/sync` pulls to any device. It exists for an iOS Shortcut, since iOS gives no app
+access to the inbox. A credit is stored with `isIncome` and never counts as a spend.
+
+Authenticate it with `SMS_INGEST_TOKEN` (`Authorization: Bearer …`) rather than an access
+token: those last 15 minutes and a Shortcut cannot refresh them. The token maps to the
+account in `SMS_USER_EMAIL`. Both are optional; without them the route accepts only a
+normal access token, which is fine for testing but not for an automation.
 
 ## How sync works
 
@@ -99,6 +112,7 @@ src/
   devices/               one doc per phone; bounds a leaked token's blast radius
   auth/                  argon2id, JWT, rotating refresh tokens, hand-rolled guard
   sync/                  the one endpoint, its schemas, and the contract tests
+  sms/                   POST /sms: a ported parser for the no-app iOS Shortcut path
 ```
 
 ## Security notes
@@ -113,6 +127,8 @@ src/
   brute-force; a database leak cannot be replayed as a token.
 - `rawSms` is never logged — `SafeLogger` redacts by key name, so a new call site cannot
   leak a message body by accident.
+- `SMS_INGEST_TOKEN` is compared with `crypto.timingSafeEqual` and stays valid until it is
+  rotated. It only opens `/sms`, not `/sync` or the auth routes.
 - Helmet, an explicit CORS allowlist, a 4 MB body cap, and a global `ValidationPipe` with
   `forbidNonWhitelisted`.
 - `/health` is public and says nothing.
