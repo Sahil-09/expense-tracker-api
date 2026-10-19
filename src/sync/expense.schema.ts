@@ -49,6 +49,10 @@ export class Expense {
   @Prop({ required: true, default: false })
   isDue: boolean;
 
+  /** Money in. Kept out of every spend total, but visible next to it for the month's net. */
+  @Prop({ required: true, default: false })
+  isIncome: boolean;
+
   @Prop({ type: Date })
   deletedAt?: Date | null;
 

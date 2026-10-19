@@ -64,6 +64,17 @@ function optionalString(name: string): string | null {
 /** Widened so the literal stays in the type; `ms` is what @nestjs/jwt's type wants. */
 export const ACCESS_TTL_MS = 15 * 60 * 1000;
 
+/**
+ * A phone Shortcut cannot refresh a 15-minute access token, so it gets its own
+ * long-lived token. Paired with an email so the token maps to exactly one account,
+ * rather than whichever user happens to be first in the collection.
+ */
+const smsIngestToken = optionalSecret('SMS_INGEST_TOKEN');
+const smsUserEmail = optionalString('SMS_USER_EMAIL');
+if (smsIngestToken && !smsUserEmail) {
+  throw new Error('SMS_USER_EMAIL is required when SMS_INGEST_TOKEN is set');
+}
+
 export const env = {
   port: requiredInt('PORT'),
   mongoUri: required('MONGO_URI'),
@@ -81,6 +92,9 @@ export const env = {
   resendApiKey: optionalSecret('RESEND_API_KEY'),
   /** Verified sender, `name <address>`. Unset means password-reset email is not sent. */
   mailFrom: optionalString('MAIL_FROM'),
+  /** Unset means POST /sms accepts only a normal access token. */
+  smsIngestToken,
+  smsUserEmail,
 };
 
 export type Env = typeof env;

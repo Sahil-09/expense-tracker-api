@@ -4,6 +4,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { env } from './config/env';
 import { AuthModule } from './auth/auth.module';
 import { HealthController } from './health/health.controller';
+import { SmsModule } from './sms/sms.module';
 import { SyncModule } from './sync/sync.module';
 import { UsersModule } from './users/users.module';
 
@@ -15,6 +16,7 @@ import { UsersModule } from './users/users.module';
     UsersModule,
     AuthModule,
     SyncModule,
+    SmsModule,
   ],
   controllers: [HealthController],
 })
