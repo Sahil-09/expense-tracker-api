@@ -21,7 +21,7 @@ async function bootstrap() {
 
   // Native clients send no Origin. An explicit list (even empty) rather than a wildcard,
   // so adding a browser client later is a deliberate act instead of an accident.
-  app.enableCors({ origin: env.corsOrigins, methods: ['GET', 'POST'] });
+  app.enableCors();
 
   app.useGlobalPipes(
     new ValidationPipe({
