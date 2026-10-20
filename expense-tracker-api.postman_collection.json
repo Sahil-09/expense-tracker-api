@@ -1,0 +1,229 @@
+{
+  "info": {
+    "name": "Expense Tracker API",
+    "description": "Postman collection for the expense-tracker-api sync backend. Set baseUrl and signupCode variables as needed.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "accessToken", "value": "", "type": "string" },
+    { "key": "refreshToken", "value": "", "type": "string" },
+    { "key": "deviceId", "value": "phone-a", "type": "string" },
+    { "key": "signupCode", "value": "change-me-openssl-rand-hex-24", "type": "string" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/health",
+            "auth": { "type": "noauth" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "POST /auth/register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "if (j.accessToken) pm.collectionVariables.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.collectionVariables.set('refreshToken', j.refreshToken);",
+                  "if (j.deviceId) pm.collectionVariables.set('deviceId', j.deviceId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"me@example.com\",\n  \"password\": \"correct horse battery staple\",\n  \"code\": \"{{signupCode}}\",\n  \"deviceName\": \"Pixel 8\",\n  \"platform\": \"android\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/register",
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "POST /auth/login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "if (j.accessToken) pm.collectionVariables.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.collectionVariables.set('refreshToken', j.refreshToken);",
+                  "if (j.deviceId) pm.collectionVariables.set('deviceId', j.deviceId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"me@example.com\",\n  \"password\": \"correct horse battery staple\",\n  \"deviceId\": \"{{deviceId}}\",\n  \"deviceName\": \"Pixel 8\",\n  \"platform\": \"android\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/login",
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "POST /auth/forgot-password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"me@example.com\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/forgot-password",
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "POST /auth/reset-password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"me@example.com\",\n  \"code\": \"12345678\",\n  \"newPassword\": \"new correct horse battery staple\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/reset-password",
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "POST /auth/refresh",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "if (j.accessToken) pm.collectionVariables.set('accessToken', j.accessToken);",
+                  "if (j.refreshToken) pm.collectionVariables.set('refreshToken', j.refreshToken);",
+                  "if (j.deviceId) pm.collectionVariables.set('deviceId', j.deviceId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/refresh",
+            "auth": { "type": "noauth" }
+          }
+        },
+        {
+          "name": "POST /auth/logout",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/logout",
+            "auth": { "type": "noauth" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sync",
+      "item": [
+        {
+          "name": "POST /sync (initial push)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{deviceId}}\",\n  \"cursor\": null,\n  \"expenses\": [\n    {\n      \"clientId\": \"c1\",\n      \"amountPaise\": 14900,\n      \"merchant\": \"Zepto\",\n      \"category\": \"Groceries\",\n      \"txnAt\": 1760000000000,\n      \"note\": null,\n      \"rawSms\": \"Zepto Rs.149.00 debited\",\n      \"dedupeKey\": \"zepto rs.149.00 debited|oct 10 2026\",\n      \"source\": \"android-live\",\n      \"isExpense\": true,\n      \"isDue\": false,\n      \"isIncome\": false\n    },\n    {\n      \"clientId\": \"c2\",\n      \"amountPaise\": 50000,\n      \"merchant\": \"Swiggy\",\n      \"category\": \"Food\",\n      \"txnAt\": 1760100000000,\n      \"note\": \"lunch\",\n      \"rawSms\": \"Rs.500 debited at SWIGGY\",\n      \"dedupeKey\": \"rs.500 debited at swiggy\",\n      \"source\": \"android-live\",\n      \"isExpense\": true,\n      \"isDue\": false\n    }\n  ],\n  \"budgets\": [\n    { \"category\": \"Food\", \"monthlyPaise\": 2000000 }\n  ],\n  \"exclusions\": [\n    { \"merchant\": \"Amazon\" }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/sync"
+          }
+        },
+        {
+          "name": "POST /sync (pull only, with cursor)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{deviceId}}\",\n  \"cursor\": \"2026-10-19T12:00:00.000Z\",\n  \"expenses\": [],\n  \"budgets\": [],\n  \"exclusions\": []\n}"
+            },
+            "url": "{{baseUrl}}/sync"
+          }
+        },
+        {
+          "name": "POST /sync (tombstone delete)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{deviceId}}\",\n  \"cursor\": null,\n  \"expenses\": [\n    {\n      \"clientId\": \"c1\",\n      \"amountPaise\": 14900,\n      \"merchant\": \"Zepto\",\n      \"category\": \"Groceries\",\n      \"txnAt\": 1760000000000,\n      \"note\": null,\n      \"rawSms\": \"\",\n      \"dedupeKey\": \"\",\n      \"source\": \"\",\n      \"isExpense\": true,\n      \"isDue\": false,\n      \"deleted\": true\n    }\n  ],\n  \"budgets\": [],\n  \"exclusions\": []\n}"
+            },
+            "url": "{{baseUrl}}/sync"
+          }
+        }
+      ]
+    },
+    {
+      "name": "SMS",
+      "item": [
+        {
+          "name": "POST /sms (added)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"body\": \"Rs.500 debited at SWIGGY on 19/10/2026 Avl Bal Rs.5000\",\n  \"receivedAt\": 1760000000000\n}"
+            },
+            "url": "{{baseUrl}}/sms"
+          }
+        },
+        {
+          "name": "POST /sms (duplicate)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"body\": \"Rs.500 debited at SWIGGY on 19/10/2026\"\n}"
+            },
+            "url": "{{baseUrl}}/sms"
+          }
+        }
+      ]
+    }
+  ]
+}
