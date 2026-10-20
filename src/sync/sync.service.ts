@@ -340,4 +340,47 @@ export class SyncService {
       lastUpdatedAt: rows.length > 0 ? (rows[rows.length - 1].updatedAt as Date) : undefined,
     };
   }
+
+  /**
+   * Pull-only variant for admin drill-down.
+   * Same cursor logic as sync() but without push/echo-suppression.
+   */
+  async pull(
+    userId: Types.ObjectId,
+    cursor?: string | null,
+  ): Promise<SyncResponse> {
+    const since = cursor
+      ? new Date(Math.min(new Date(cursor).getTime(), Date.now()))
+      : new Date(0);
+
+    const [expensesPull, budgetsPull, exclusionsPull] = await Promise.all([
+      this.pullExpenses(userId, since, []),
+      this.pullBudgets(userId, since, []),
+      this.pullExclusions(userId, since, []),
+    ]);
+
+    const expenses = expensesPull.items;
+    const budgets = budgetsPull.items;
+    const exclusions = exclusionsPull.items;
+
+    const cursorAnchor = new Date();
+    const safeLimits = [
+      expenses.length >= PAGE && expensesPull.lastUpdatedAt ? expensesPull.lastUpdatedAt : cursorAnchor,
+      budgets.length >= PAGE && budgetsPull.lastUpdatedAt ? budgetsPull.lastUpdatedAt : cursorAnchor,
+      exclusions.length >= PAGE && exclusionsPull.lastUpdatedAt ? exclusionsPull.lastUpdatedAt : cursorAnchor,
+    ];
+    const nextCursor = new Date(Math.min(...safeLimits.map((d) => d.getTime())));
+
+    return {
+      cursor: nextCursor.toISOString(),
+      hasMore:
+        expenses.length >= PAGE ||
+        budgets.length >= PAGE ||
+        exclusions.length >= PAGE,
+      expenses,
+      budgets,
+      exclusions,
+      duplicates: {},
+    };
+  }
 }

@@ -95,6 +95,8 @@ export const env = {
   /** Unset means POST /sms accepts only a normal access token. */
   smsIngestToken,
   smsUserEmail,
+  /** Admin allowlist. Empty = admin endpoints closed. */
+  adminEmails: optionalList('ADMIN_EMAILS'),
 };
 
 export type Env = typeof env;
