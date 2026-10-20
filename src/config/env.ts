@@ -5,6 +5,14 @@
  * missing or malformed one must stop the process rather than surface as a confusing
  * runtime error later. JWT secrets are the reason this is not just `process.env.x ?? ''`.
  */
+// Local dev: neither `nest start` nor `node dist/main` loads .env the way docker compose
+// does. Docker injects env vars and tests set their own, so a missing file is expected there.
+try {
+  process.loadEnvFile?.();
+} catch {
+  // No .env present; rely on the real environment.
+}
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing required env var ${name}`);
