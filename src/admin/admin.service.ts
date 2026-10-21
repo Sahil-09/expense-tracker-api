@@ -86,9 +86,10 @@ export class AdminService {
     const match: Record<string, unknown> = {};
 
     if (fromMs !== undefined || toMs !== undefined) {
+      // txnAt is a Mongoose Date — compare against Dates, not epoch ms numbers.
       match.txnAt = {};
-      if (fromMs !== undefined) (match.txnAt as Record<string, number>).$gte = fromMs;
-      if (toMs !== undefined) (match.txnAt as Record<string, number>).$lt = toMs;
+      if (fromMs !== undefined) (match.txnAt as Record<string, Date>).$gte = new Date(fromMs);
+      if (toMs !== undefined) (match.txnAt as Record<string, Date>).$lt = new Date(toMs);
     }
 
     // Aggregate spend and income per user
@@ -132,13 +133,13 @@ export class AdminService {
     const byUser = new Map<string, number>();
     const incomeByUser = new Map<string, number>();
     const countByUser = new Map<string, number>();
-    const lastTxnByUser = new Map<string, number>();
+    const lastTxnByUser = new Map<string, number | null>();
 
     for (const row of spendAgg) {
       byUser.set(row._id.toString(), row.spendPaise);
       incomeByUser.set(row._id.toString(), row.incomePaise);
       countByUser.set(row._id.toString(), row.txnCount);
-      lastTxnByUser.set(row._id.toString(), row.lastTxnAt);
+      lastTxnByUser.set(row._id.toString(), row.lastTxnAt ? new Date(row.lastTxnAt as unknown as Date).getTime() : null);
     }
 
     // Every registered account, not just those with rows in the window — a month
