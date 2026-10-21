@@ -4,6 +4,7 @@ import { Model, Types } from 'mongoose';
 
 import { SafeLogger } from '../logging/safe-logger';
 import { Device, DeviceDocument } from '../devices/device.schema';
+import { reconcilePushedBulk } from '../sms/bulk';
 import { Budget, BudgetDocument } from './budget.schema';
 import {
   BudgetChange,
@@ -77,11 +78,19 @@ export class SyncService {
     // we take the minimum of the lastUpdatedAt of any truncated collection (length >= PAGE),
     // or the current start of the sync (cursor).
     const safeLimits = [
-      expenses.length >= PAGE && expensesPull.lastUpdatedAt ? expensesPull.lastUpdatedAt : cursor,
-      budgets.length >= PAGE && budgetsPull.lastUpdatedAt ? budgetsPull.lastUpdatedAt : cursor,
-      exclusions.length >= PAGE && exclusionsPull.lastUpdatedAt ? exclusionsPull.lastUpdatedAt : cursor,
+      expenses.length >= PAGE && expensesPull.lastUpdatedAt
+        ? expensesPull.lastUpdatedAt
+        : cursor,
+      budgets.length >= PAGE && budgetsPull.lastUpdatedAt
+        ? budgetsPull.lastUpdatedAt
+        : cursor,
+      exclusions.length >= PAGE && exclusionsPull.lastUpdatedAt
+        ? exclusionsPull.lastUpdatedAt
+        : cursor,
     ];
-    const nextCursor = new Date(Math.min(...safeLimits.map((d) => d.getTime())));
+    const nextCursor = new Date(
+      Math.min(...safeLimits.map((d) => d.getTime())),
+    );
 
     this.log.log(
       `pushed ${pushed.expenses.length}/${pushed.budgets.length}/${pushed.exclusions.length}, ` +
@@ -154,6 +163,11 @@ export class SyncService {
         if (!held.has(r.dedupeKey)) held.set(r.dedupeKey, r.clientId);
     }
 
+    // Bulk-statement SMS pushed by a phone running the older single-transaction parser:
+    // piece 1 of each is repaired in place and the missing pieces are minted below, all
+    // before the ops are built so neither needs a second write path.
+    await reconcilePushedBulk(this.expenses, this.exclusions, userId, changes);
+
     const written: string[] = [];
     const ops: Parameters<typeof this.expenses.bulkWrite>[0] = [];
 
@@ -207,7 +221,10 @@ export class SyncService {
       try {
         await this.expenses.bulkWrite(ops, { ordered: false });
       } catch (e) {
-        const isDup = typeof e === 'object' && e !== null && (e as any).code === 11000;
+        const isDup =
+          typeof e === 'object' &&
+          e !== null &&
+          (e as { code?: number }).code === 11000;
         if (!isDup) throw e;
       }
     }
@@ -286,7 +303,8 @@ export class SyncService {
 
     return {
       items,
-      lastUpdatedAt: rows.length > 0 ? (rows[rows.length - 1].updatedAt as Date) : undefined,
+      lastUpdatedAt:
+        rows.length > 0 ? rows[rows.length - 1].updatedAt : undefined,
     };
   }
 
@@ -294,7 +312,14 @@ export class SyncService {
     userId: Types.ObjectId,
     since: Date,
     exclude: string[],
-  ): Promise<{ items: { category: string; monthlyPaise: number; deletedAt: number | null }[]; lastUpdatedAt?: Date }> {
+  ): Promise<{
+    items: {
+      category: string;
+      monthlyPaise: number;
+      deletedAt: number | null;
+    }[];
+    lastUpdatedAt?: Date;
+  }> {
     const rows = await this.budgets
       .find({
         userId,
@@ -312,7 +337,8 @@ export class SyncService {
     }));
     return {
       items,
-      lastUpdatedAt: rows.length > 0 ? (rows[rows.length - 1].updatedAt as Date) : undefined,
+      lastUpdatedAt:
+        rows.length > 0 ? rows[rows.length - 1].updatedAt : undefined,
     };
   }
 
@@ -320,7 +346,10 @@ export class SyncService {
     userId: Types.ObjectId,
     since: Date,
     exclude: string[],
-  ): Promise<{ items: { merchant: string; deletedAt: number | null }[]; lastUpdatedAt?: Date }> {
+  ): Promise<{
+    items: { merchant: string; deletedAt: number | null }[];
+    lastUpdatedAt?: Date;
+  }> {
     const rows = await this.exclusions
       .find({
         userId,
@@ -337,7 +366,8 @@ export class SyncService {
     }));
     return {
       items,
-      lastUpdatedAt: rows.length > 0 ? (rows[rows.length - 1].updatedAt as Date) : undefined,
+      lastUpdatedAt:
+        rows.length > 0 ? rows[rows.length - 1].updatedAt : undefined,
     };
   }
 
@@ -365,11 +395,19 @@ export class SyncService {
 
     const cursorAnchor = new Date();
     const safeLimits = [
-      expenses.length >= PAGE && expensesPull.lastUpdatedAt ? expensesPull.lastUpdatedAt : cursorAnchor,
-      budgets.length >= PAGE && budgetsPull.lastUpdatedAt ? budgetsPull.lastUpdatedAt : cursorAnchor,
-      exclusions.length >= PAGE && exclusionsPull.lastUpdatedAt ? exclusionsPull.lastUpdatedAt : cursorAnchor,
+      expenses.length >= PAGE && expensesPull.lastUpdatedAt
+        ? expensesPull.lastUpdatedAt
+        : cursorAnchor,
+      budgets.length >= PAGE && budgetsPull.lastUpdatedAt
+        ? budgetsPull.lastUpdatedAt
+        : cursorAnchor,
+      exclusions.length >= PAGE && exclusionsPull.lastUpdatedAt
+        ? exclusionsPull.lastUpdatedAt
+        : cursorAnchor,
     ];
-    const nextCursor = new Date(Math.min(...safeLimits.map((d) => d.getTime())));
+    const nextCursor = new Date(
+      Math.min(...safeLimits.map((d) => d.getTime())),
+    );
 
     return {
       cursor: nextCursor.toISOString(),

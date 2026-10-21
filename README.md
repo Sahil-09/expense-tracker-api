@@ -82,6 +82,22 @@ token: those last 15 minutes and a Shortcut cannot refresh them. The token maps 
 account in `SMS_USER_EMAIL`. Both are optional; without them the route accepts only a
 normal access token, which is fine for testing but not for an automation.
 
+### Bulk statement SMS
+
+A message holding several transactions (`Rs.500 debited at A; Rs.250 debited at B`) is
+stored as one expense per transaction, not as one wrong row. Each transaction parsed
+completely is its own row; rows after the first carry an indexed dedupe key (`body|day|n`)
+— `src/sms/bulk.ts` names the scheme and `src/sms/parse.ts` must stay byte-identical to
+the phone's copy. Rows pushed by a phone running the older single-transaction parser are
+mended on the `/sync` push itself: the first transaction's fields are corrected in place
+and the missing ones are minted, idempotently, so a re-push adds nothing. History already
+in the database gets the same treatment once:
+
+```bash
+pnpm exec ts-node src/sms/repair-bulk.ts --email you@example.com   # dry run: counts only
+pnpm exec ts-node src/sms/repair-bulk.ts --email you@example.com --apply
+```
+
 ## How sync works
 
 One cursor-based endpoint, not CRUD per resource.

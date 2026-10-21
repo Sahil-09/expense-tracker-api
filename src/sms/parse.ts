@@ -46,11 +46,16 @@ const REJECT = [
 // No `g` flag: detectDirection tests these repeatedly, and a global regex carries
 // lastIndex between calls, which would make the answer depend on call order.
 const CREDIT =
-  /\b(credited|received|remitted|refund(?:ed)?|salary|interest earned|cashback|cr\.?\b)/i;
+  /\b(credited|received|remitted|refund(?:ed)?|salary|interest earned|cashback)|\bcr\.?\s+(?=₹|rs\.?|inr|\d)/i;
 
-/** Money demonstrably left the account. Beats CREDIT, so "debited ... cashback credited" stays a spend. */
+/**
+ * Money demonstrably left the account. Beats CREDIT, so "debited ... cashback credited" stays a spend.
+ *
+ * "Dr." is Canara's shorthand for a debit, but the bare word is also a title, so it only
+ * counts when an amount follows it: "Dr. INR 1,680.00" is a spend, "Dr. Smith's clinic" is not.
+ */
 const DEBIT_STRONG =
-  /\b(debited|spent|charged|paid|withdrawn|purchased|dr\.?)\b/i;
+  /\b(debited|spent|charged|paid|withdrawn|purchased)\b|\bdr\.?\s+(?=₹|rs\.?|inr|\d)/i;
 
 /**
  * Names a payment without saying one left. Loses to CREDIT, so "Payment of Rs 500 has
@@ -186,4 +191,41 @@ export function parseSms(body: string, receivedAt: number | null): ParseResult {
     ok: true,
     parsed: { amountPaise, merchant, txnAt, direction, kind: classify(text) },
   };
+}
+
+/** A statement-style SMS should not become a novel; 20 transactions covers any real bank. */
+const MAX_BULK_TXNS = 20;
+
+/** Separators banks use between transactions in one message, after whitespace is collapsed. */
+const SEGMENT_SPLIT = /[;|]\s*/;
+
+export type BulkResult =
+  { ok: true; txns: Parsed[] } | { ok: false; reason: string };
+
+/**
+ * One body, every transaction it holds. A bulk/statement SMS ("Rs 500 debited at A;
+ * Rs 250 debited at B") arrives as ONE body, and the single-body read produces one wrong
+ * row — the first amount on its own. Splitting only counts when at least two pieces each
+ * parse completely, so a single-transaction message with a stray separator (Canara writes
+ * "to Famous Chick; UPI: ...") cannot be torn in two.
+ */
+export function extractTransactions(
+  body: string,
+  receivedAt: number | null,
+): BulkResult {
+  const whole = parseSms(body, receivedAt);
+  if (!whole.ok) return whole;
+
+  const text = body.replace(/\s+/g, ' ').trim();
+  const pieces = text.split(SEGMENT_SPLIT).filter((p) => p.trim() !== '');
+  if (pieces.length < 2) return { ok: true, txns: [whole.parsed] };
+
+  const txns: Parsed[] = [];
+  for (const piece of pieces) {
+    const r = parseSms(piece, receivedAt);
+    if (r.ok) txns.push(r.parsed);
+    if (txns.length >= MAX_BULK_TXNS) break;
+  }
+  if (txns.length >= 2) return { ok: true, txns };
+  return { ok: true, txns: [whole.parsed] };
 }
