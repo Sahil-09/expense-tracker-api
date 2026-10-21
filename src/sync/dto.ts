@@ -100,30 +100,41 @@ export class ExclusionChange {
   deleted?: boolean;
 }
 
+/**
+ * The cap sits above the pull page (500) on purpose: the phone pushes its whole unsynced
+ * backlog in one call — the first sync of years of history — and capping at the page size
+ * would 400 exactly the request that matters most. 2000 rows of real SMS sit well under
+ * the 4 MB body cap in `main.ts`.
+ */
+export const MAX_PUSH_ROWS = 2000;
+
 export class SyncRequest {
   @IsString()
   @MaxLength(64)
   deviceId: string;
 
-  @Transform(({ value }) => (value === '' ? null : value))
+  @Transform(({ value }: { value: unknown }) => (value === '' ? null : value))
   @IsOptional()
   @IsISO8601()
   cursor?: string | null;
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(MAX_PUSH_ROWS)
   @ValidateNested({ each: true })
   @Type(() => ExpenseChange)
   expenses?: ExpenseChange[];
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(MAX_PUSH_ROWS)
   @ValidateNested({ each: true })
   @Type(() => BudgetChange)
   budgets?: BudgetChange[];
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(MAX_PUSH_ROWS)
   @ValidateNested({ each: true })
   @Type(() => ExclusionChange)
   exclusions?: ExclusionChange[];

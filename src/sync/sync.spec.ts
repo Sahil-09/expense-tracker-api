@@ -192,13 +192,24 @@ describe('POST /sync', () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     // Push the 501st item
-    await post({ deviceId: 'phone-a', expenses: [expense({ clientId: 'bulk-500', dedupeKey: 'key-500' })] }, a).expect(201);
+    await post(
+      {
+        deviceId: 'phone-a',
+        expenses: [expense({ clientId: 'bulk-500', dedupeKey: 'key-500' })],
+      },
+      a,
+    ).expect(201);
 
-    const page1 = await post({ deviceId: 'phone-b', cursor: null }, b).expect(201);
+    const page1 = await post({ deviceId: 'phone-b', cursor: null }, b).expect(
+      201,
+    );
     expect(page1.body.expenses).toHaveLength(500);
     expect(page1.body.hasMore).toBe(true);
 
-    const page2 = await post({ deviceId: 'phone-b', cursor: page1.body.cursor }, b).expect(201);
+    const page2 = await post(
+      { deviceId: 'phone-b', cursor: page1.body.cursor },
+      b,
+    ).expect(201);
     expect(page2.body.expenses).toHaveLength(1);
     expect(page2.body.expenses[0].clientId).toBe('bulk-500');
     expect(page2.body.hasMore).toBe(false);
@@ -310,6 +321,78 @@ describe('POST /sync', () => {
     await post(
       { deviceId: 'phone-b', expenses: [expense({ clientId: 'from-b' })] },
       b,
+    ).expect(201);
+    expect(await expenses().countDocuments()).toBe(1);
+  });
+
+  // A phone carrying the older single-transaction parser pushes a statement-style SMS
+  // with two debits in one message as one row: the first amount, badly named. The server
+  // mends piece 1 in place and stores the rest as their own rows.
+  const BULK_SMS =
+    'Rs.500.00 debited at SWIGGY on 19/10/2026; Rs.250.00 debited at UBER on 19/10/2026';
+
+  it('repairs a bulk-SMS row pushed as one mis-parsed expense', async () => {
+    const out = await post(
+      {
+        deviceId: 'phone-a',
+        expenses: [
+          expense({
+            clientId: 'bulk-sms',
+            dedupeKey: 'bulk-sms-key',
+            amountPaise: 99900,
+            merchant: 'Rs.500.00 debited',
+            category: 'Other',
+            rawSms: BULK_SMS,
+          }),
+        ],
+      },
+      a,
+    ).expect(201);
+
+    const fixed = await expenses().findOne({ clientId: 'bulk-sms' }).lean();
+    expect(fixed).toMatchObject({
+      amountPaise: 50000,
+      merchant: 'Swiggy',
+      category: 'Food',
+    });
+    // Never rewritten: it is the phone's dedupe contract and the cursor's day.
+    expect(fixed?.dedupeKey).toBe('bulk-sms-key');
+
+    // Piece 2 is its own row, and it is delivered back in the same response.
+    const pulled = (out.body as SyncResponse).expenses;
+    expect(pulled).toHaveLength(1);
+    expect(pulled[0].amountPaise).toBe(25000);
+    expect(pulled[0].dedupeKey.endsWith('|2')).toBe(true);
+  });
+
+  it('re-pushing a bulk row mints nothing twice', async () => {
+    const row = expense({
+      clientId: 'bulk-sms',
+      dedupeKey: 'bulk-sms-key',
+      amountPaise: 99900,
+      merchant: 'Rs.500.00 debited',
+      category: 'Other',
+      rawSms: BULK_SMS,
+    });
+    await post({ deviceId: 'phone-a', expenses: [row] }, a).expect(201);
+    await post({ deviceId: 'phone-a', expenses: [row] }, a).expect(201);
+    expect(await expenses().countDocuments()).toBe(2);
+  });
+
+  it('a tombstone for a bulk row splits nothing', async () => {
+    await post(
+      {
+        deviceId: 'phone-a',
+        expenses: [
+          expense({
+            clientId: 'gone',
+            dedupeKey: 'gone-key',
+            rawSms: BULK_SMS,
+            deleted: true,
+          }),
+        ],
+      },
+      a,
     ).expect(201);
     expect(await expenses().countDocuments()).toBe(1);
   });

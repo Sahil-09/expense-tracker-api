@@ -16,6 +16,7 @@ import {
 export class SmsRequest {
   @IsString()
   @IsNotEmpty()
+  @MaxLength(4000)
   body: string;
 
   @IsOptional()
@@ -25,5 +26,6 @@ export class SmsRequest {
 
 export type SmsResponse =
   | { status: 'added'; clientId: string }
+  | { status: 'added-multi'; clientIds: string[] }
   | { status: 'duplicate' }
   | { status: 'skipped'; reason: string };

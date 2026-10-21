@@ -6,21 +6,15 @@ import { Model, Types } from 'mongoose';
 import { SafeLogger } from '../logging/safe-logger';
 import { Exclusion, ExclusionDocument } from '../sync/exclusion.schema';
 import { Expense, ExpenseDocument } from '../sync/expense.schema';
-import { categorize } from './categories';
+import {
+  bulkRows,
+  categoryFor,
+  dedupeKey,
+  merchantExcluded,
+  mintMissingRows,
+} from './bulk';
 import { SmsRequest, SmsResponse } from './dto';
-import { parseSms } from './parse';
-
-/** Same normalisation as the phone's `exclusionKey`. Both sides must agree. */
-const exclusionKey = (merchant: string) =>
-  merchant.replace(/\s+/g, ' ').trim().toLowerCase();
-
-/**
- * Matches the phone's `dedupeKey` exactly: normalised body plus the day the expense
- * landed on. A server-ingested SMS and a later device re-scan therefore collapse into
- * one row instead of two.
- */
-const dedupeKey = (body: string, at: number) =>
-  `${body.replace(/\s+/g, ' ').trim().toLowerCase()}|${new Date(at).toDateString()}`;
+import { extractTransactions, Parsed } from './parse';
 
 @Injectable()
 export class SmsService {
@@ -34,19 +28,22 @@ export class SmsService {
   ) {}
 
   /**
-   * Turns one raw SMS into an expense, or explains why it is not one.
+   * Turns one raw SMS into an expense — or, for a statement-style message carrying
+   * several transactions, into one expense each.
    *
    * The user id always comes from the access token, never the request body: a Shortcut
    * holds one token and must not be able to write into another account.
    */
   async ingest(userId: Types.ObjectId, req: SmsRequest): Promise<SmsResponse> {
-    const parsed = parseSms(req.body, req.receivedAt ?? null);
-    if (!parsed.ok) {
-      this.log.log(`skipped (${parsed.reason}), ${req.body.length} chars`);
-      return { status: 'skipped', reason: parsed.reason };
+    const batch = extractTransactions(req.body, req.receivedAt ?? null);
+    if (!batch.ok) {
+      this.log.log(`skipped (${batch.reason}), ${req.body.length} chars`);
+      return { status: 'skipped', reason: batch.reason };
     }
+    if (batch.txns.length > 1)
+      return this.ingestBulk(userId, req.body, batch.txns);
 
-    const { amountPaise, merchant, txnAt, kind } = parsed.parsed;
+    const { amountPaise, merchant, txnAt, kind } = batch.txns[0];
     const key = dedupeKey(req.body, txnAt);
 
     // Checked before the insert so the common case is a cheap read. The unique partial
@@ -64,7 +61,7 @@ export class SmsService {
     if (
       kind !== 'income' &&
       merchant &&
-      (await this.isExcluded(userId, merchant))
+      (await merchantExcluded(this.exclusions, userId, merchant))
     ) {
       return { status: 'skipped', reason: 'not-expense' };
     }
@@ -76,10 +73,7 @@ export class SmsService {
         clientId,
         amountPaise,
         merchant: merchant ?? null,
-        // A transfer is never a spend, and naming it beats the merchant scrape, which
-        // reads "Suryoday Small Finance Ba" and cannot match a category rule.
-        category:
-          kind === 'transfer' ? 'Transfer' : categorize(merchant ?? req.body),
+        category: categoryFor(kind, merchant, req.body),
         txnAt: new Date(txnAt),
         note: null,
         rawSms: req.body,
@@ -107,15 +101,26 @@ export class SmsService {
     return { status: 'added', clientId };
   }
 
-  private async isExcluded(
+  /**
+   * A bulk statement SMS becomes one row per transaction. Piece 1 keeps the plain
+   * (body, day) dedupe key — an old phone's single-row scan of the same message
+   * collapses into it — and pieces 2..n take the indexed sub-key.
+   */
+  private async ingestBulk(
     userId: Types.ObjectId,
-    merchant: string,
-  ): Promise<boolean> {
-    const row = await this.exclusions
-      .findOne({ userId, merchant: exclusionKey(merchant), deletedAt: null })
-      .select('_id')
-      .lean()
-      .exec();
-    return row !== null;
+    body: string,
+    txns: Parsed[],
+  ): Promise<SmsResponse> {
+    const pieces = await bulkRows(
+      this.exclusions,
+      userId,
+      body,
+      txns,
+      'ios-shortcut',
+    );
+    const created = await mintMissingRows(this.expenses, userId, pieces);
+    if (created === 0) return { status: 'duplicate' };
+    this.log.log(`bulk ${body.length} chars -> ${created} rows`);
+    return { status: 'added-multi', clientIds: pieces.map((p) => p.clientId) };
   }
 }
