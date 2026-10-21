@@ -141,17 +141,18 @@ export class AdminService {
       lastTxnByUser.set(row._id.toString(), row.lastTxnAt);
     }
 
-    // Get all users that have expenses (from the aggregation)
-    const userIds = [...new Set(spendAgg.map((r) => r._id.toString()))];
+    // Every registered account, not just those with rows in the window — a month
+    // with no activity must still list the user with zeroed totals.
     const userDocs = await this.users
-      .find({ _id: { $in: userIds.map((id) => new Types.ObjectId(id)) } })
+      .find({})
       .select('email createdAt')
       .lean()
       .exec();
+    const allUserIds = userDocs.map((u) => u._id);
 
     // Also get lastSeenAt from devices
     const deviceDocs = await this.devices
-      .find({ userId: { $in: userIds.map((id) => new Types.ObjectId(id)) }, revokedAt: null })
+      .find({ userId: { $in: allUserIds }, revokedAt: null })
       .select('userId lastSeenAt')
       .lean()
       .exec();
