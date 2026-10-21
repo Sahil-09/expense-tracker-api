@@ -358,11 +358,12 @@ describe('POST /sync', () => {
     // Never rewritten: it is the phone's dedupe contract and the cursor's day.
     expect(fixed?.dedupeKey).toBe('bulk-sms-key');
 
-    // Piece 2 is its own row, and it is delivered back in the same response.
+    // Piece 2 is its own row, keyed on its own message text, delivered back in the
+    // same response.
     const pulled = (out.body as SyncResponse).expenses;
     expect(pulled).toHaveLength(1);
     expect(pulled[0].amountPaise).toBe(25000);
-    expect(pulled[0].dedupeKey.endsWith('|2')).toBe(true);
+    expect(pulled[0].dedupeKey).toContain('uber on 19/10/2026');
   });
 
   it('re-pushing a bulk row mints nothing twice', async () => {

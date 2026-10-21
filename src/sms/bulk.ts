@@ -5,7 +5,7 @@ import { ExpenseChange } from '../sync/dto';
 import { ExclusionDocument } from '../sync/exclusion.schema';
 import { ExpenseDocument } from '../sync/expense.schema';
 import { categorize } from './categories';
-import { extractTransactions, Parsed } from './parse';
+import { extractTransactions, Parsed, PieceTxn } from './parse';
 
 /** Same normalisation as the phone's `exclusionKey`. Both sides must agree. */
 export const exclusionKey = (merchant: string) =>
@@ -20,15 +20,17 @@ export const dedupeKey = (body: string, at: number) =>
   `${body.replace(/\s+/g, ' ').trim().toLowerCase()}|${new Date(at).toDateString()}`;
 
 /**
- * Pieces 2..n of one bulk SMS need keys of their own — they are the same body and day as
- * piece 1, so the plain key would collide on the unique index.
+ * Every piece is keyed on its OWN text — the same key a standalone row of that message
+ * carries — so a message already stored collapses into that row by the unique index
+ * instead of being minted twice. The `|n` suffix exists only when one block contains the
+ * identical message more than once: there the two pieces would draw the same key, and
+ * the suffix (the piece's 1-based position) keeps the index unique between them.
  *
- * shortcut: the `|n` suffix and the index order (parse order, 1-based) are a cross-repo
- * contract. The phone's copy of parse.ts must mint identical keys when it learns to
- * split, or a re-scan of a split body double-counts.
+ * shortcut: this keying is a cross-repo contract. The phone's copy of parse.ts must mint
+ * identical keys when it learns to split, or a re-scan of a pasted block double-counts.
  */
-export const subDedupeKey = (body: string, at: number, n: number) =>
-  `${dedupeKey(body, at)}|${n}`;
+export const subDedupeKey = (pieceText: string, at: number, n: number) =>
+  `${dedupeKey(pieceText, at)}|${n}`;
 
 /** Same call the ingest path makes today: a transfer is named over the merchant scrape. */
 export const categoryFor = (
@@ -73,26 +75,36 @@ export type PieceRow = {
 };
 
 /**
- * Maps the parsed transactions of one body to rows. The first piece (`firstIndex`-based
- * position in the whole body) keeps the plain (body, day) key so an old phone's
- * single-row scan still collapses into it; later pieces take the indexed sub-key.
+ * Maps the parsed transactions of one body to rows. Every piece is keyed on its own
+ * text (piece 1 plain, later ones with the `|n` index), so each carries the key a
+ * standalone row of the same message carries and old rows collapse by the unique index.
  * Excluded merchants and income are per piece, same rule as a single-transaction ingest.
  */
 export async function bulkRows(
   exclusions: Model<ExclusionDocument>,
   userId: Types.ObjectId,
   body: string,
-  txns: Parsed[],
+  txns: PieceTxn[],
   source: string,
   firstIndex = 0,
 ): Promise<PieceRow[]> {
   const rows: PieceRow[] = [];
+  // How often each piece text appears in the block: a repeated identical message draws
+  // the same key twice, and only there the position is appended to the key.
+  const seen = new Map<string, number>();
+  for (const t of txns) {
+    const base = dedupeKey(t.text, t.txnAt);
+    seen.set(base, (seen.get(base) ?? 0) + 1);
+  }
   for (let i = 0; i < txns.length; i++) {
     const t = txns[i];
+    const base = dedupeKey(t.text, t.txnAt);
     const key =
       firstIndex + i === 0
-        ? dedupeKey(body, t.txnAt)
-        : subDedupeKey(body, t.txnAt, firstIndex + i + 1);
+        ? base
+        : seen.get(base)! > 1
+          ? subDedupeKey(t.text, t.txnAt, firstIndex + i + 1)
+          : base;
     if (
       t.kind !== 'income' &&
       t.merchant &&
@@ -104,10 +116,12 @@ export async function bulkRows(
       clientId: randomUUID(),
       amountPaise: t.amountPaise,
       merchant: t.merchant ?? null,
-      category: categoryFor(t.kind, t.merchant, body),
+      category: categoryFor(t.kind, t.merchant, t.text),
       txnAt: new Date(t.txnAt),
       note: null,
-      rawSms: body,
+      // The row is one transaction, so its SMS is the piece's own text — not the whole
+      // block, which would re-read as a bulk body on every later parse.
+      rawSms: t.text,
       source,
       isExpense: t.kind === 'spend',
       isDue: t.kind === 'due',
@@ -191,14 +205,22 @@ export const drifts = (stored: StoredFields, want: Piece1Fix): boolean =>
   stored.isIncome !== want.isIncome;
 
 /**
+ * A pasted block pushed by an old phone can carry txnAt = epoch 0 — its dedupe key ends
+ * "|Thu Jan 01 1970". A repair may fix such a hopeless date from the message text, but
+ * never a real one: moving a genuine timestamp would rewrite history by day.
+ */
+export const txnHopeless = (stored: Date | number): boolean =>
+  new Date(stored).getTime() < 946684800000;
+
+/**
  * Bulk-SMS repair for rows arriving through a /sync push.
  *
  * A phone carrying the older single-transaction parser pushes each statement-style SMS as
- * one wrong row. This re-reads every rawSms, rewrites piece 1's parsed fields on the pushed
- * change (the upsert then writes them), and mints the missing pieces 2..n. dedupeKey and
- * txnAt of the pushed row are never touched — they are the phone's dedupe contract and the
- * cursor's day, and leaving them makes the repair identical on every re-push, so it cannot
- * churn other devices' pulls.
+ * rows, rewrites piece 1's parsed fields on the pushed change (the upsert then writes
+ * them), and mints the missing pieces 2..n. dedupeKey of the pushed row is never touched
+ * — it is the phone's dedupe contract, and leaving it makes the repair identical on every
+ * re-push, so it cannot churn other devices' pulls. txnAt is left alone too except when
+ * it is hopeless (epoch 0 from an old push) — the message text knows the real day.
  */
 export async function reconcilePushedBulk(
   expenses: Model<ExpenseDocument>,
@@ -206,7 +228,7 @@ export async function reconcilePushedBulk(
   userId: Types.ObjectId,
   changes: ExpenseChange[],
 ): Promise<void> {
-  const bulk: { c: ExpenseChange; txns: Parsed[] }[] = [];
+  const bulk: { c: ExpenseChange; txns: PieceTxn[] }[] = [];
   for (const c of changes) {
     if (c.deleted || c.rawSms.trim() === '') continue;
     const m = extractTransactions(c.rawSms, c.txnAt);
@@ -220,7 +242,9 @@ export async function reconcilePushedBulk(
   // old parser, and the only chance to fix it before the phone stores its own copy.
   const stored = await expenses
     .find({ userId, clientId: { $in: bulk.map((b) => b.c.clientId) } })
-    .select('clientId amountPaise merchant category isExpense isDue isIncome')
+    .select(
+      'clientId amountPaise merchant category isExpense isDue isIncome txnAt',
+    )
     .lean()
     .exec();
   const byId = new Map(stored.map((r) => [r.clientId, r]));
@@ -228,6 +252,9 @@ export async function reconcilePushedBulk(
   for (const { c, txns } of bulk) {
     const want = fieldsOf(txns[0], c.rawSms);
     const row = byId.get(c.clientId);
+    // The one allowed txnAt correction: an epoch-0 date is an old push's bug, and the
+    // message text knows the truth. A real date is never moved.
+    if (row && txnHopeless(row.txnAt)) c.txnAt = txns[0].txnAt;
     if (!row) {
       Object.assign(c, want);
       continue;

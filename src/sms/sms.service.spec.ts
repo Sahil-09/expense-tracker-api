@@ -177,8 +177,8 @@ describe('SmsService.ingest — bulk statement SMS', () => {
 
     const [first, second] = create.mock.calls.map((c) => c[0] ?? {});
 
-    // Piece 1 keeps the plain key; piece 2 takes the indexed sub-key the phone's
-    // parser must adopt when it learns to split.
+    // Each piece carries the key a standalone message of its text would — piece 2's key
+    // is plain piece text, not an indexed sub-key the index would refuse to collapse.
     expect(first).toMatchObject({
       amountPaise: 50000,
       merchant: 'Swiggy',
@@ -191,10 +191,10 @@ describe('SmsService.ingest — bulk statement SMS', () => {
       category: 'Transport',
     });
     expect(String(first.dedupeKey).endsWith('|2')).toBe(false);
-    expect(String(second.dedupeKey).endsWith('|2')).toBe(true);
-    expect(String(second.dedupeKey).startsWith(String(first.dedupeKey))).toBe(
-      true,
-    );
+    expect(String(second.dedupeKey).endsWith('|2')).toBe(false);
+    // Piece keys are built from the piece's own text now, not the whole body.
+    expect(String(first.dedupeKey)).toContain('swiggy');
+    expect(String(second.dedupeKey)).toContain('uber on 19/10/2026');
   });
 
   it('replays a bulk body as duplicate, not a second set of rows', async () => {
@@ -211,12 +211,70 @@ describe('SmsService.ingest — bulk statement SMS', () => {
     if (out.status !== 'added-multi') return;
     expect(out.clientIds).toHaveLength(1);
     expect(create).toHaveBeenCalledTimes(1);
-    expect(create).toHaveBeenCalledTimes(1);
     const [only] = create.mock.calls.map((c) => c[0] ?? {});
     expect(only).toMatchObject({
       amountPaise: 25000,
       merchant: 'UBER',
     });
+  });
+
+  // Verbatim from the user's inbox: a Shortcut run once pasted EIGHT separate BOB
+  // messages into one body, run together with no separator at all — that is how the
+  // current live rows ended up holding one amount for a whole block.
+  const PASTED_BLOCK = [
+    'Rs.69.00 Dr. from A/C XXXXXX0674 and Cr. to amzn-ds2pfucrpz4@apl. Ref:499438792179. AvlBal:Rs4303.95(2026:10:21 10:14:57). Not you? Call 18005700/5000-BOB',
+    'Rs.4.85 Dr. from A/C XXXXXX0674 and Cr. to bdpg.iruts@sbi. Ref:772720502456. AvlBal:Rs4372.95(2026:10:21 09:44:47). Not you? Call 18005700/5000-BOB',
+    'Rs.1000.00 Dr. from A/C XXXXXX0674 and Cr. to 8828924662@ibl. Ref:842857565217. AvlBal:Rs3861.13(2025:07:20 12:58:47). Not you? Call 18005700/5000-BOB',
+    'Rs.5.00 Dr. from A/C XXXXXX0674 and Cr. to irctctourism1paytm@hdfcbank. Ref:101884042531. AvlBal:Rs2028.40(2025:11:04 05:47:00). Not you? Call 18005700/5000-BOB',
+    'Rs.300.00 Dr. from A/C XXXXXX0674 and Cr. to kshoaib783-2@oksbi. Ref:958400636271. AvlBal:Rs2036.40(2025:11:05 07:59:21). Not you? Call 18005700/5000-BOB',
+    'Rs.20.00 Dr. from A/C XXXXXX0674 and Cr. to mahadiksimran8@okhdfcbank. Ref:675218450238. AvlBal:Rs118.13(2025:08:01 09:02:43). Not you? Call 18005700/5000-BOB',
+    'Rs.1.00 Dr. from A/C XXXXXX0674 and Cr. to vilposmum@ptybl. Ref:567607935042. AvlBal:Rs1306.40(2025:11:06 02:41:14). Not you? Call 18005700/5000-BOB',
+    'Rs.20.00 Dr. from A/C XXXXXX0674 and Cr. to Q867016778@ybl. Ref:144949896915. AvlBal:Rs138.13(2025:07:31 09:48:20). Not you? Call 18005700/5000-BOB',
+  ].join(' ');
+
+  it('stores one row per message of a pasted block with no separator', async () => {
+    const { service, create } = makeService();
+    const out = await service.ingest(userId, {
+      body: PASTED_BLOCK,
+      receivedAt: at,
+    });
+    expect(out.status).toBe('added-multi');
+    if (out.status !== 'added-multi') return;
+    expect(out.clientIds).toHaveLength(8);
+    expect(create).toHaveBeenCalledTimes(8);
+
+    const calls = create.mock.calls.map((c) => c[0] ?? {});
+    // Piece keys carry the piece's own text, so piece 2 of the block lands on the same
+    // key a standalone scan of that message mints — the unique index does the dedupe.
+    const bdpg = calls.find((r) => r.amountPaise === 485);
+    expect(String(bdpg?.dedupeKey)).toContain(
+      'rs.4.85 dr. from a/c xxxxxx0674 and cr. to bdpg.iruts@sbi',
+    );
+    expect(String(bdpg?.dedupeKey)).toContain(
+      'bdpg.iruts@sbi. ref:772720502456',
+    );
+    // The 4.85 message appears once in the block, so its key is the plain piece key —
+    // the same one a standalone scan of that message mints and the index collapses on.
+    expect(String(bdpg?.dedupeKey).endsWith('|2')).toBe(false);
+    // The piece's own in-body date beats the receive-time anchor, or its key day could
+    // never collapse into a standalone row scanned with the real day.
+    expect(bdpg?.txnAt instanceof Date && bdpg.txnAt.getTime()).toBe(
+      new Date(2026, 9, 21, 12).getTime(),
+    );
+  });
+
+  it('a message the account holds standalone is refused by the index, not doubled', async () => {
+    // The unique-index winner: minting a piece that already exists as a row throws
+    // code 11000, and the piece is counted held instead of failing the batch. This is
+    // the exact behaviour the pasted-block repair relies on.
+    const dup = Object.assign(new Error('dup'), { code: 11000 });
+    const { service, create } = makeService({ createError: dup });
+    const out = await service.ingest(userId, {
+      body: PASTED_BLOCK,
+      receivedAt: at,
+    });
+    expect(out).toEqual({ status: 'duplicate' });
+    expect(create).toHaveBeenCalledTimes(8);
   });
 });
 
@@ -271,5 +329,46 @@ describe('parseSms (server copy)', () => {
         reason: 'no-direction',
       },
     );
+  });
+
+  // Verbatim from the user's inbox: BOB writes the amount FIRST — "Rs.69.00 Dr. from
+  // A/C ... and Cr. to <vpa>@" — with a colon-stamped date at the end.
+  it('reads a BOB "amount Dr." debit, names Amazon for its amzn VPA', () => {
+    const out = parseSms(
+      'Rs.69.00 Dr. from A/C XXXXXX0674 and Cr. to amzn-ds2pfucrpz4@apl. Ref:499438792179. ' +
+        'AvlBal:Rs4303.95(2026:10:21 10:14:57). Not you? Call 18005700/5000-BOB',
+      at,
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.parsed.amountPaise).toBe(6900);
+    expect(out.parsed.direction).toBe('debit');
+    expect(out.parsed.kind).toBe('spend');
+    expect(out.parsed.merchant).toBe('Amazon');
+  });
+
+  it('keeps an unknown VPA as the merchant, bank handle intact', () => {
+    const out = parseSms(
+      'Rs.4.85 Dr. from A/C XXXXXX0674 and Cr. to bdpg.iruts@sbi. Ref:772720502456. ' +
+        'AvlBal:Rs4372.95(2026:10:21 09:44:47). Not you? Call 18005700/5000-BOB',
+      at,
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.parsed.amountPaise).toBe(485);
+    // Not "bdpg.iruts@" — the noise-word scrub would drop the @sbi handle.
+    expect(out.parsed.merchant).toBe('bdpg.iruts@sbi');
+  });
+
+  it('reads the BOB colon date when no receivedAt exists', () => {
+    const out = parseSms(
+      'Rs.1000.00 Dr. from A/C XXXXXX0674 and Cr. to 8828924662@ibl. Ref:842857565217. ' +
+        'AvlBal:Rs3861.13(2025:07:20 12:58:47). Not you? Call 18005700/5000-BOB',
+      null,
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.parsed.txnAt).toBe(new Date(2025, 6, 20, 12).getTime());
+    expect(out.parsed.merchant).toBe('8828924662@ibl');
   });
 });

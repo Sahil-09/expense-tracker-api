@@ -53,9 +53,11 @@ const CREDIT =
  *
  * "Dr." is Canara's shorthand for a debit, but the bare word is also a title, so it only
  * counts when an amount follows it: "Dr. INR 1,680.00" is a spend, "Dr. Smith's clinic" is not.
+ * BOB writes the amount first — "Rs.69.00 Dr. from A/C ..." — so "Dr. from" (the account
+ * it left) counts too, and the title use still never can.
  */
 const DEBIT_STRONG =
-  /\b(debited|spent|charged|paid|withdrawn|purchased)\b|\bdr\.?\s+(?=₹|rs\.?|inr|\d)/i;
+  /\b(debited|spent|charged|paid|withdrawn|purchased)\b|\bdr\.?\s+(?=₹|rs\.?|inr|\d|from\b)/i;
 
 /**
  * Names a payment without saying one left. Loses to CREDIT, so "Payment of Rs 500 has
@@ -110,6 +112,9 @@ const MERCHANT_PATTERNS = [
   /\b(?:at|to)\s+([A-Za-z0-9][A-Za-z0-9 .&'/-]{1,38}?)\s*[;,]\s*(?:upi|ref|txn|transaction|avail)/i,
   /\btowards\s+([A-Za-z0-9][A-Za-z0-9 .&'/-]{1,38}?)(?:\s+on|\s*,|$)/i,
   /\bfor\s+([A-Za-z0-9][A-Za-z0-9 .&'/-]{1,38}?)(?:\s+on\s|\s+using|\s*$)/i,
+  // A UPI counterparty — BOB writes a debit as "Dr. from A/C ... and Cr. to
+  // <vpa>@<handle>". Anchored on the @ so ordinary payee names never match this.
+  /\bto\s+([A-Za-z0-9][A-Za-z0-9.-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)/i,
 ];
 
 const MONTHS = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
@@ -137,11 +142,12 @@ function extractMerchant(body: string): string | null {
   for (const re of MERCHANT_PATTERNS) {
     const m = body.match(re);
     if (!m) continue;
-    const cleaned = m[1]
-      .replace(/[^\w .&'/-]/g, '')
-      .replace(NOISE, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    // A VPA ("name@handle") is an identifier, not prose: the noise words below would
+    // eat the bank handle ("iruts@sbi" → "@"), so "@" captures skip that step.
+    const raw = m[1].includes('@')
+      ? m[1]
+      : m[1].replace(/[^\w .&'/@-]/g, '').replace(NOISE, ' ');
+    const cleaned = raw.replace(/\s+/g, ' ').trim();
     if (cleaned.length >= 3) return cleaned;
   }
   return null;
@@ -159,6 +165,12 @@ function parseBodyDate(body: string): number | null {
     const month = MONTHS.split('|').indexOf(m[2].toLowerCase()) + 1;
     return build(+m[3], month, +m[1]);
   }
+
+  // Year-first with colons — BOB stamps "(2026:10:21 10:14:57)". Requires the 4-digit
+  // year so the trailing "10:14:57" time can never be misread as a date.
+  m = body.match(/(\d{4}):(\d{1,2}):(\d{1,2})/);
+  if (m) return build(+m[1], +m[2], +m[3]);
+
   return null;
 }
 
@@ -196,11 +208,26 @@ export function parseSms(body: string, receivedAt: number | null): ParseResult {
 /** A statement-style SMS should not become a novel; 20 transactions covers any real bank. */
 const MAX_BULK_TXNS = 20;
 
-/** Separators banks use between transactions in one message, after whitespace is collapsed. */
-const SEGMENT_SPLIT = /[;|]\s*/;
+/**
+ * Separators banks use between transactions in one message, after whitespace is
+ * collapsed. Also splits before an amount that a Dr./Cr. shorthand follows — how BOB
+ * statements concatenate ("…5000-BOB Rs.1250.00 Dr. from …") with no separator at all.
+ * Canara's amount-after order ("Dr. INR 1,680.00") cannot match this, and a trailing
+ * balance ("AvlBal:Rs4303.95(2026:…") owns no shorthand after its amount.
+ */
+const SEGMENT_SPLIT =
+  /[;|]\s*|\s+(?=(?:₹|rs\.?|inr)\s?[\d,]+(?:\.\d{1,2})?\s+(?:dr|cr)\.)/i;
+
+/**
+ * One transaction of a bulk message: its parse plus the exact text it was parsed from.
+ * `text` is what dedupe keys are built from — a piece stored as its own row must carry
+ * the key a standalone message of the same text would, so a re-scan of one message of a
+ * pasted block collapses into the piece instead of doubling it.
+ */
+export type PieceTxn = Parsed & { text: string };
 
 export type BulkResult =
-  { ok: true; txns: Parsed[] } | { ok: false; reason: string };
+  { ok: true; txns: PieceTxn[] } | { ok: false; reason: string };
 
 /**
  * One body, every transaction it holds. A bulk/statement SMS ("Rs 500 debited at A;
@@ -218,14 +245,18 @@ export function extractTransactions(
 
   const text = body.replace(/\s+/g, ' ').trim();
   const pieces = text.split(SEGMENT_SPLIT).filter((p) => p.trim() !== '');
-  if (pieces.length < 2) return { ok: true, txns: [whole.parsed] };
+  if (pieces.length < 2) return { ok: true, txns: [{ ...whole.parsed, text }] };
 
-  const txns: Parsed[] = [];
+  const txns: PieceTxn[] = [];
   for (const piece of pieces) {
-    const r = parseSms(piece, receivedAt);
-    if (r.ok) txns.push(r.parsed);
+    // A piece carries its own in-body date when it has one; the caller's receive-time
+    // anchor only fills the gap. Key days must not depend on when the block arrived.
+    let r = parseSms(piece, null);
+    if (!r.ok && r.reason === 'no-date' && receivedAt !== null)
+      r = parseSms(piece, receivedAt);
+    if (r.ok) txns.push({ ...r.parsed, text: piece });
     if (txns.length >= MAX_BULK_TXNS) break;
   }
   if (txns.length >= 2) return { ok: true, txns };
-  return { ok: true, txns: [whole.parsed] };
+  return { ok: true, txns: [{ ...whole.parsed, text }] };
 }
