@@ -16,7 +16,6 @@ import {
 export class SmsRequest {
   @IsString()
   @IsNotEmpty()
-  @MaxLength(4000)
   body: string;
 
   @IsOptional()

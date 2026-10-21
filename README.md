@@ -2,7 +2,7 @@
 
 Private sync backend for the Expense Tracker app. NestJS + MongoDB, self-hosted, one account.
 
-The app stays offline-first. This is a sync *peer*, not a dependency — if this box is down,
+The app stays offline-first. This is a sync _peer_, not a dependency — if this box is down,
 slow or gone, the app is indistinguishable from normal use.
 
 ## Running it
@@ -48,17 +48,17 @@ npx tsc --noEmit
 
 ## The API
 
-| | |
-|---|---|
-| `GET /health` | Liveness only. No version, no uptime, no DB round trip. |
-| `POST /auth/register` | `{ email, password, code }` — closed unless `SIGNUP_CODE` is set |
-| `POST /auth/forgot-password` | `{ email }` — always 200; mails a code if mail is configured |
-| `POST /auth/reset-password` | `{ email, code, newPassword }` — 204, or 401 on a bad, expired or used code |
-| `POST /auth/login` | `{ email, password, deviceId?, deviceName?, platform? }` |
-| `POST /auth/refresh` | `{ refreshToken }` — rotating; the old one stops working |
-| `POST /auth/logout` | `{ refreshToken }` — idempotent |
-| `POST /sync` | `{ deviceId, cursor?, expenses[], budgets[], exclusions[] }` |
-| `POST /sms` | `{ body, receivedAt? }` — raw bank SMS from an iOS Shortcut |
+|                              |                                                                             |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `GET /health`                | Liveness only. No version, no uptime, no DB round trip.                     |
+| `POST /auth/register`        | `{ email, password, code }` — closed unless `SIGNUP_CODE` is set            |
+| `POST /auth/forgot-password` | `{ email }` — always 200; mails a code if mail is configured                |
+| `POST /auth/reset-password`  | `{ email, code, newPassword }` — 204, or 401 on a bad, expired or used code |
+| `POST /auth/login`           | `{ email, password, deviceId?, deviceName?, platform? }`                    |
+| `POST /auth/refresh`         | `{ refreshToken }` — rotating; the old one stops working                    |
+| `POST /auth/logout`          | `{ refreshToken }` — idempotent                                             |
+| `POST /sync`                 | `{ deviceId, cursor?, expenses[], budgets[], exclusions[] }`                |
+| `POST /sms`                  | `{ body, receivedAt? }` — raw bank SMS from an iOS Shortcut                 |
 
 `register` answers 401 when `SIGNUP_CODE` is not configured, so an outsider cannot tell
 whether an operator ever enabled it. The reset routes answer identically for a known and an
@@ -84,9 +84,11 @@ normal access token, which is fine for testing but not for an automation.
 
 ### Bulk statement SMS
 
-A message holding several transactions (`Rs.500 debited at A; Rs.250 debited at B`) is
-stored as one expense per transaction, not as one wrong row. Each transaction parsed
-completely is its own row; rows after the first carry an indexed dedupe key (`body|day|n`)
+A message holding several transactions (`Rs.500 debited at A; Rs.250 debited at B`, or a
+pasted block of statements run together with no separator) is stored as one expense per
+transaction, not as one wrong row. Each transaction parsed completely is its own row,
+keyed by its own transaction text — the same key a standalone message of that text carries
+— so the unique index collapses a piece into an already-stored row instead of doubling it.
 — `src/sms/bulk.ts` names the scheme and `src/sms/parse.ts` must stay byte-identical to
 the phone's copy. Rows pushed by a phone running the older single-transaction parser are
 mended on the `/sync` push itself: the first transaction's fields are corrected in place
@@ -110,7 +112,7 @@ One cursor-based endpoint, not CRUD per resource.
   wrong clock therefore cannot win.
 - **Idempotent.** Push is an upsert on `(userId, clientId)`, so re-pushing a row rewrites
   it with identical values. `(userId, dedupeKey)` is also unique, which makes a re-scanned
-  SMS a no-op; when two devices capture the *same* SMS, the second push is reported in
+  SMS a no-op; when two devices capture the _same_ SMS, the second push is reported in
   `duplicates` rather than 500-ing on the index.
 - **Deletes are tombstones.** A row that vanished would break the cursor, so `deletedAt`
   is set and the row stays.
@@ -188,7 +190,7 @@ ops/backup.sh          # nightly via cron
 ops/restore-test.sh    # restores into a throwaway container and checks it
 ```
 
-**Run the restore test on a schedule, not once.** It compares row counts *and* index specs
+**Run the restore test on a schedule, not once.** It compares row counts _and_ index specs
 against the live database, because a restore that brings back the rows but not the unique
 indexes produces a database that looks healthy and quietly accepts the same bank SMS
 twice. It never touches the live database or the `mongo-data` volume.

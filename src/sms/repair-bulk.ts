@@ -22,7 +22,13 @@ import { AppModule } from '../app.module';
 import { Exclusion, ExclusionDocument } from '../sync/exclusion.schema';
 import { Expense, ExpenseDocument } from '../sync/expense.schema';
 import { User } from '../users/user.schema';
-import { bulkRows, fieldsOf, type StoredFields, drifts } from './bulk';
+import {
+  bulkRows,
+  drifts,
+  fieldsOf,
+  txnHopeless,
+  type StoredFields,
+} from './bulk';
 import { extractTransactions } from './parse';
 
 function arg(name: string): string {
@@ -70,7 +76,6 @@ async function main() {
       if (!m.ok || m.txns.length < 2) continue;
       bulkMessages++;
 
-      const want = fieldsOf(m.txns[0], row.rawSms);
       const stored: StoredFields = {
         clientId: row.clientId,
         amountPaise: row.amountPaise,
@@ -80,10 +85,6 @@ async function main() {
         isDue: row.isDue,
         isIncome: row.isIncome,
       };
-      if (row.isExpense && drifts(stored, want)) {
-        mendedRow1++;
-        if (apply) await expenses.updateOne({ _id: row._id }, { $set: want });
-      }
 
       // Pieces 2..n mint on the same sub-key scheme ingestion uses, so a later re-scan
       // and this script cannot disagree about what already exists.
@@ -108,6 +109,50 @@ async function main() {
             .exec()
         ).map((r) => r.dedupeKey),
       );
+
+      // A row whose key matches one of the block's pieces is itself a minted piece that
+      // an older run stored with the whole block as rawSms. Mend it from its OWN slice
+      // — mending it from piece 1 would overwrite it with the wrong transaction — and
+      // correct rawSms to the piece text, so it stops re-reading as a bulk body.
+      const own = row.isExpense
+        ? slices.find((s) => s.dedupeKey === row.dedupeKey)
+        : undefined;
+      const want = fieldsOf(m.txns[0], row.rawSms);
+      if (own) {
+        // The mend is one-way and idempotent: a live row only changes when the message
+        // text disagrees with what is stored. txnAt is touched only when it is hopeless
+        // (epoch 0 from an old push) — a real date is never moved.
+        const needMend =
+          drifts(stored, own) ||
+          row.rawSms !== own.rawSms ||
+          txnHopeless(row.txnAt);
+        if (needMend) {
+          mendedRow1++;
+          if (apply) {
+            const ownSet: Record<string, unknown> = {
+              amountPaise: own.amountPaise,
+              merchant: own.merchant,
+              category: own.category,
+              isExpense: own.isExpense,
+              isDue: own.isDue,
+              isIncome: own.isIncome,
+              rawSms: own.rawSms,
+            };
+            if (txnHopeless(row.txnAt)) ownSet.txnAt = own.txnAt;
+            await expenses.updateOne({ _id: row._id }, { $set: ownSet });
+          }
+        }
+        // Not `continue`: the block's other pieces still get their mint check below.
+      } else {
+        // Same one-way rule for the block's piece-1 row. txnAt only when hopeless.
+        const fixDay = txnHopeless(row.txnAt);
+        const set: Record<string, unknown> = { ...want };
+        if (fixDay) set.txnAt = new Date(m.txns[0].txnAt);
+        if (row.isExpense && (drifts(stored, want) || fixDay)) {
+          mendedRow1++;
+          if (apply) await expenses.updateOne({ _id: row._id }, { $set: set });
+        }
+      }
       for (const piece of slices) {
         if (held.has(piece.dedupeKey)) continue;
         missingPieces++;

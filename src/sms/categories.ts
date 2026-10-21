@@ -28,6 +28,8 @@ const KNOWN_MERCHANDS: readonly (readonly [RegExp, string])[] = [
   [/\bzepto\b/i, 'Zepto'],
   [/\bzomato\b/i, 'Zomato'],
   [/\bswiggy\b/i, 'Swiggy'],
+  // "amzn-ds2pfucrpz4@apl" — Amazon's UPI VPA prefix, how BOB names its payees.
+  [/\bamzn\b/i, 'Amazon'],
 ];
 
 export function detectKnownMerchant(text: string): string | null {

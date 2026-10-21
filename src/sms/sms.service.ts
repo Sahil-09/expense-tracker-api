@@ -14,7 +14,7 @@ import {
   mintMissingRows,
 } from './bulk';
 import { SmsRequest, SmsResponse } from './dto';
-import { extractTransactions, Parsed } from './parse';
+import { extractTransactions, PieceTxn } from './parse';
 
 @Injectable()
 export class SmsService {
@@ -109,7 +109,7 @@ export class SmsService {
   private async ingestBulk(
     userId: Types.ObjectId,
     body: string,
-    txns: Parsed[],
+    txns: PieceTxn[],
   ): Promise<SmsResponse> {
     const pieces = await bulkRows(
       this.exclusions,
