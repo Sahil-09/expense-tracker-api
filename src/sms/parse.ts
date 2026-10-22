@@ -18,6 +18,8 @@ export type Parsed = {
   txnAt: number;
   direction: Direction;
   kind: SpendKind;
+  /** True only when the body carried a full date-and-time stamp (BOB's "(2026:10:21 07:34:50)"). */
+  txnExact?: boolean;
 };
 
 export type ParseResult =
@@ -154,29 +156,61 @@ function extractMerchant(body: string): string | null {
 }
 
 /** Local noon avoids DST shifting a midnight timestamp into the previous day. */
-function parseBodyDate(body: string): number | null {
+/**
+ * The body's own date stamps. Order matters: dd/mm, month names, then BOB's year-first
+ * "(2026:10:21 07:34:50)" — whose bracket time replaces the noon when it parses.
+ */
+function parseBodyDate(body: string): { at: number; exact: boolean } | null {
+  const at = (
+    d: number | null,
+    exact = false,
+  ): { at: number; exact: boolean } | null =>
+    d === null ? null : { at: d, exact };
+
   let m = body.match(new RegExp(`(\\d{1,2})[/-](\\d{1,2})[/-](\\d{2,4})`));
-  if (m) return build(+m[3], +m[2], +m[1]);
+  if (m) return at(build(+m[3], +m[2], +m[1]));
 
   m = body.match(
     new RegExp(`(\\d{1,2})[ -](${MONTHS})[a-z]*[ -](\\d{2,4})`, 'i'),
   );
   if (m) {
     const month = MONTHS.split('|').indexOf(m[2].toLowerCase()) + 1;
-    return build(+m[3], month, +m[1]);
+    return at(build(+m[3], month, +m[1]));
   }
 
   // Year-first with colons — BOB stamps "(2026:10:21 10:14:57)". Requires the 4-digit
-  // year so the trailing "10:14:57" time can never be misread as a date.
-  m = body.match(/(\d{4}):(\d{1,2}):(\d{1,2})/);
-  if (m) return build(+m[1], +m[2], +m[3]);
+  // year so the trailing "10:14:57" time can never be misread as a date; the time is
+  // captured when it trails the date and used exactly.
+  m = body.match(/(\d{4}):(\d{1,2}):(\d{1,2})(?: (\d{1,2}):(\d{2}):(\d{2}))?/);
+  if (m) {
+    const hasTime =
+      m[4] !== undefined && +m[4] < 24 && +m[5] < 60 && +m[6] < 60;
+    return at(
+      build(
+        +m[1],
+        +m[2],
+        +m[3],
+        hasTime ? +m[4] : 12,
+        hasTime ? +m[5] : 0,
+        hasTime ? +m[6] : 0,
+      ),
+      hasTime,
+    );
+  }
 
   return null;
 }
 
-function build(year: number, month: number, day: number): number | null {
+function build(
+  year: number,
+  month: number,
+  day: number,
+  hour = 12,
+  minute = 0,
+  second = 0,
+): number | null {
   const y = year < 100 ? (year < 70 ? 2000 + year : 1900 + year) : year;
-  const t = new Date(y, month - 1, day, 12).getTime();
+  const t = new Date(y, month - 1, day, hour, minute, second).getTime();
   return Number.isFinite(t) ? t : null;
 }
 
@@ -194,14 +228,25 @@ export function parseSms(body: string, receivedAt: number | null): ParseResult {
   const amountPaise = extractAmount(text);
   if (!amountPaise) return { ok: false, reason: 'no-amount' };
 
-  const txnAt = receivedAt ?? parseBodyDate(text) ?? null;
+  const bodyDate = parseBodyDate(text);
+  // receivedAt stays the single-message contract (an inbox row's receive time); the body
+  // date is the fallback, and the exact flag rides along only for the bracket-time case.
+  const txnAt = receivedAt ?? bodyDate?.at ?? null;
   if (txnAt === null) return { ok: false, reason: 'no-date' };
 
   const merchant = detectKnownMerchant(text) ?? extractMerchant(text);
 
   return {
     ok: true,
-    parsed: { amountPaise, merchant, txnAt, direction, kind: classify(text) },
+    parsed: {
+      amountPaise,
+      merchant,
+      txnAt,
+      direction,
+      kind: classify(text),
+      txnExact:
+        receivedAt === null && bodyDate?.exact === true ? true : undefined,
+    },
   };
 }
 
