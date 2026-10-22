@@ -26,7 +26,7 @@ import {
   bulkRows,
   drifts,
   fieldsOf,
-  txnHopeless,
+  txnAtFixable,
   type StoredFields,
 } from './bulk';
 import { extractTransactions } from './parse';
@@ -73,7 +73,28 @@ async function main() {
       if (!row.rawSms || row.rawSms.trim() === '') continue;
       const m = extractTransactions(row.rawSms, row.txnAt.getTime());
       scanned++;
-      if (!m.ok || m.txns.length < 2) continue;
+      if (!m.ok || m.txns.length < 2) {
+        // Single-message row: no split, no mint. Only the one-way txnAt correction
+        // applies — the old parser stamped these rows at noon, while the message
+        // carries the real time in its bracket. A row whose body has no date (or no
+        // time) is left exactly as it is.
+        if (m.ok && row.isExpense) {
+          // Re-read without the receive-time anchor, or the stored time would answer.
+          const body = extractTransactions(row.rawSms, null);
+          if (body.ok && body.txns.length === 1) {
+            const want = body.txns[0].txnAt;
+            if (txnAtFixable(row.txnAt, want, body.txns[0].txnExact === true)) {
+              mendedRow1++;
+              if (apply)
+                await expenses.updateOne(
+                  { _id: row._id },
+                  { $set: { txnAt: new Date(want) } },
+                );
+            }
+          }
+        }
+        continue;
+      }
       bulkMessages++;
 
       const stored: StoredFields = {
@@ -117,15 +138,18 @@ async function main() {
       const own = row.isExpense
         ? slices.find((s) => s.dedupeKey === row.dedupeKey)
         : undefined;
-      const want = fieldsOf(m.txns[0], row.rawSms);
       if (own) {
         // The mend is one-way and idempotent: a live row only changes when the message
         // text disagrees with what is stored. txnAt is touched only when it is hopeless
-        // (epoch 0 from an old push) — a real date is never moved.
+        // (epoch 0) or a same-day body-stamped time — a real date is never moved across
+        // days, and an already-equal value is never rewritten.
+        const fixDay = txnAtFixable(
+          row.txnAt,
+          own.txnAt.getTime(),
+          own.txnExact === true,
+        );
         const needMend =
-          drifts(stored, own) ||
-          row.rawSms !== own.rawSms ||
-          txnHopeless(row.txnAt);
+          drifts(stored, own) || row.rawSms !== own.rawSms || fixDay;
         if (needMend) {
           mendedRow1++;
           if (apply) {
@@ -138,14 +162,19 @@ async function main() {
               isIncome: own.isIncome,
               rawSms: own.rawSms,
             };
-            if (txnHopeless(row.txnAt)) ownSet.txnAt = own.txnAt;
+            if (fixDay) ownSet.txnAt = own.txnAt;
             await expenses.updateOne({ _id: row._id }, { $set: ownSet });
           }
         }
         // Not `continue`: the block's other pieces still get their mint check below.
       } else {
-        // Same one-way rule for the block's piece-1 row. txnAt only when hopeless.
-        const fixDay = txnHopeless(row.txnAt);
+        // Same one-way rule for the block's piece-1 row: hopeless or same-day-exact.
+        const fixDay = txnAtFixable(
+          row.txnAt,
+          m.txns[0].txnAt,
+          m.txns[0].txnExact === true,
+        );
+        const want = fieldsOf(m.txns[0], row.rawSms);
         const set: Record<string, unknown> = { ...want };
         if (fixDay) set.txnAt = new Date(m.txns[0].txnAt);
         if (row.isExpense && (drifts(stored, want) || fixDay)) {

@@ -72,6 +72,8 @@ export type PieceRow = {
   isDue: boolean;
   isIncome: boolean;
   deletedAt: null;
+  /** Not a schema field: Mongoose strips it on create; the repair script reads it. */
+  txnExact?: boolean;
 };
 
 /**
@@ -128,6 +130,7 @@ export async function bulkRows(
       isIncome: t.kind === 'income',
       deletedAt: null,
       dedupeKey: key,
+      txnExact: t.txnExact === true ? true : undefined,
     });
   }
   return rows;
@@ -212,6 +215,24 @@ export const drifts = (stored: StoredFields, want: Piece1Fix): boolean =>
 export const txnHopeless = (stored: Date | number): boolean =>
   new Date(stored).getTime() < 946684800000;
 
+const sameDay = (a: number, b: number) =>
+  new Date(a).toDateString() === new Date(b).toDateString();
+
+/**
+ * When a repair may rewrite a stored txnAt: it is hopeless (epoch 0), or the new value
+ * comes from a full body timestamp (BOB's bracket time) and only moves WITHIN the stored
+ * day — same-day moves cannot change a dedupe key or a cursor day. Never crosses days,
+ * and never rewrites an equal value, so a mend stays idempotent.
+ */
+export const txnAtFixable = (
+  stored: Date | number,
+  want: number,
+  wantExact: boolean,
+): boolean => {
+  const s = new Date(stored).getTime();
+  return s !== want && (txnHopeless(s) || (wantExact && sameDay(s, want)));
+};
+
 /**
  * Bulk-SMS repair for rows arriving through a /sync push.
  *
@@ -253,8 +274,13 @@ export async function reconcilePushedBulk(
     const want = fieldsOf(txns[0], c.rawSms);
     const row = byId.get(c.clientId);
     // The one allowed txnAt correction: an epoch-0 date is an old push's bug, and the
-    // message text knows the truth. A real date is never moved.
-    if (row && txnHopeless(row.txnAt)) c.txnAt = txns[0].txnAt;
+    // message text knows the truth; a same-day body-stamped time is a truer minute of
+    // the same day. A real date is never moved across days.
+    if (
+      row &&
+      txnAtFixable(row.txnAt, txns[0].txnAt, txns[0].txnExact === true)
+    )
+      c.txnAt = txns[0].txnAt;
     if (!row) {
       Object.assign(c, want);
       continue;

@@ -259,7 +259,7 @@ describe('SmsService.ingest — bulk statement SMS', () => {
     // The piece's own in-body date beats the receive-time anchor, or its key day could
     // never collapse into a standalone row scanned with the real day.
     expect(bdpg?.txnAt instanceof Date && bdpg.txnAt.getTime()).toBe(
-      new Date(2026, 9, 21, 12).getTime(),
+      new Date(2026, 9, 21, 9, 44, 47).getTime(),
     );
   });
 
@@ -368,7 +368,33 @@ describe('parseSms (server copy)', () => {
     );
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.parsed.txnAt).toBe(new Date(2025, 6, 20, 12).getTime());
+    // The bracket stamp is the transaction time, hour and minute included.
+    expect(out.parsed.txnAt).toBe(new Date(2025, 6, 20, 12, 58, 47).getTime());
+    expect(out.parsed.txnExact).toBe(true);
     expect(out.parsed.merchant).toBe('8828924662@ibl');
+  });
+
+  it('falls back to noon when the BOB stamp carries no time', () => {
+    const out = parseSms(
+      'Rs.1000.00 Dr. from A/C XXXXXX0674 and Cr. to 8828924662@ibl. Ref:842857565217. ' +
+        'AvlBal:Rs3861.13(2025:07:20). Not you? Call 18005700/5000-BOB',
+      null,
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.parsed.txnAt).toBe(new Date(2025, 6, 20, 12).getTime());
+    expect(out.parsed.txnExact).toBeUndefined();
+  });
+
+  it('ignores a garbage time and still lands the BOB date at noon', () => {
+    const out = parseSms(
+      'Rs.1000.00 Dr. from A/C XXXXXX0674 and Cr. to 8828924662@ibl. Ref:842857565217. ' +
+        'AvlBal:Rs3861.13(2025:07:20 99:99:99). Not you? Call 18005700/5000-BOB',
+      null,
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.parsed.txnAt).toBe(new Date(2025, 6, 20, 12).getTime());
+    expect(out.parsed.txnExact).toBeUndefined();
   });
 });
