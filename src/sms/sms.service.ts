@@ -35,7 +35,11 @@ export class SmsService {
    * holds one token and must not be able to write into another account.
    */
   async ingest(userId: Types.ObjectId, req: SmsRequest): Promise<SmsResponse> {
-    const batch = extractTransactions(req.body, req.receivedAt ?? null);
+    // The arrival is the only evidence of which half of the day a meridiem-less bank
+    // stamp meant. The Shortcut fires as the SMS lands, so the server clock serves when
+    // the payload carries no timestamp of its own.
+    const anchor = req.receivedAt ?? Date.now();
+    const batch = extractTransactions(req.body, req.receivedAt ?? null, anchor);
     if (!batch.ok) {
       this.log.log(`skipped (${batch.reason}), ${req.body.length} chars`);
       return { status: 'skipped', reason: batch.reason };

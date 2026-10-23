@@ -22,6 +22,32 @@ const PAGE = 500;
 
 const ms = (d?: Date | null) => (d ? d.getTime() : null);
 
+/**
+ * Cursor codec.
+ *
+ * Compound form "ISO|<rowId>" carries the page-boundary row that broke a tie: one bulk
+ * import stamps thousands of rows with an identical updatedAt, so a plain date cursor
+ * silently drops the remainder of the group once a page splits it. Everything before
+ * the '|' is the date the old cursor carried, so a cursor stored by any earlier client
+ * — phone or web — decodes exactly as before.
+ */
+function decodeCursor(cursor?: string | null): { at?: Date; rowId?: string } {
+  if (!cursor) return {};
+  const [datePart, idPart] = cursor.split('|');
+  const at = new Date(datePart);
+  if (Number.isNaN(at.getTime())) return {};
+  // A client somehow storing the future would match nothing and silently stop every
+  // update on that device, so clamp like the old code did.
+  const clamped = new Date(Math.min(at.getTime(), Date.now()));
+  return idPart && Types.ObjectId.isValid(idPart)
+    ? { at: clamped, rowId: idPart }
+    : { at: clamped };
+}
+
+function encodeCursor(row: { updatedAt: Date; _id: unknown }): string {
+  return `${row.updatedAt.toISOString()}|${String(row._id)}`;
+}
+
 @Injectable()
 export class SyncService {
   private readonly log = new SafeLogger(SyncService.name);
@@ -57,40 +83,46 @@ export class SyncService {
     // between the two.
     const cursor = new Date();
 
-    // Clamped to now. A cursor the client somehow stored in the future would otherwise
-    // match nothing at all and silently stop every update on that device, with no error
-    // and no way back except clearing its data.
-    const since = req.cursor
-      ? new Date(Math.min(new Date(req.cursor).getTime(), Date.now()))
-      : new Date(0);
+    // Budgets and exclusions page on the plain date; only expenses are numerous enough
+    // to need the compound tie-break (see decodeCursor).
+    const sinceDate = decodeCursor(req.cursor).at ?? new Date(0);
 
     const [expensesPull, budgetsPull, exclusionsPull] = await Promise.all([
-      this.pullExpenses(userId, since, pushed.expenses),
-      this.pullBudgets(userId, since, pushed.budgets),
-      this.pullExclusions(userId, since, pushed.exclusions),
+      this.pullExpenses(userId, req.cursor ?? null, pushed.expenses),
+      this.pullBudgets(userId, sinceDate, pushed.budgets),
+      this.pullExclusions(userId, sinceDate, pushed.exclusions),
     ]);
 
     const expenses = expensesPull.items;
     const budgets = budgetsPull.items;
     const exclusions = exclusionsPull.items;
 
-    // Advance cursor safely: to prevent data loss when pagination cuts off some collections,
-    // we take the minimum of the lastUpdatedAt of any truncated collection (length >= PAGE),
-    // or the current start of the sync (cursor).
-    const safeLimits = [
-      expenses.length >= PAGE && expensesPull.lastUpdatedAt
-        ? expensesPull.lastUpdatedAt
-        : cursor,
-      budgets.length >= PAGE && budgetsPull.lastUpdatedAt
-        ? budgetsPull.lastUpdatedAt
-        : cursor,
-      exclusions.length >= PAGE && exclusionsPull.lastUpdatedAt
-        ? exclusionsPull.lastUpdatedAt
-        : cursor,
-    ];
-    const nextCursor = new Date(
-      Math.min(...safeLimits.map((d) => d.getTime())),
+    // Advance the cursor to the earliest incomplete collection boundary. A full page
+    // hands back its exact last row (compound, so the next call resumes inside a tie
+    // group); a partial page means that collection is drained and the fallback is the
+    // anchor above — anything written during this call stays after the cursor.
+    const anchorEdge: { at: Date; compound?: string } = { at: cursor };
+    const boundaryEdge = expensesPull.boundary
+      ? { at: expensesPull.boundary.at, compound: expensesPull.boundary.id }
+      : anchorEdge;
+    const budgetEdge =
+      budgetsPull.items.length >= PAGE && budgetsPull.lastUpdatedAt
+        ? { at: budgetsPull.lastUpdatedAt }
+        : anchorEdge;
+    const exclEdge =
+      exclusionsPull.items.length >= PAGE && exclusionsPull.lastUpdatedAt
+        ? { at: exclusionsPull.lastUpdatedAt }
+        : anchorEdge;
+    // The expense boundary is listed first so it wins any exact tie: a tie between the
+    // boundary and the anchor means the page broke inside a tie group, and only the
+    // compound cursor resumes from the right row.
+    const min = [boundaryEdge, budgetEdge, exclEdge, anchorEdge].reduce(
+      (m, b) => (b.at.getTime() < m.at.getTime() ? b : m),
     );
+    const nextCursor =
+      min.compound !== undefined
+        ? `${min.at.toISOString()}|${min.compound}`
+        : min.at.toISOString();
 
     this.log.log(
       `pushed ${pushed.expenses.length}/${pushed.budgets.length}/${pushed.exclusions.length}, ` +
@@ -109,11 +141,11 @@ export class SyncService {
       .catch(() => {});
 
     return {
-      cursor: nextCursor.toISOString(),
+      cursor: nextCursor,
       hasMore:
-        expenses.length >= PAGE ||
-        budgets.length >= PAGE ||
-        exclusions.length >= PAGE,
+        expensesPull.count >= PAGE ||
+        budgetsPull.items.length >= PAGE ||
+        exclusionsPull.items.length >= PAGE,
       expenses,
       budgets,
       exclusions,
@@ -268,19 +300,42 @@ export class SyncService {
    *
    * The exclusion is what makes a cursor workable: without it a device would receive back
    * everything it just sent on every single sync and rewrite it locally forever.
+   *
+   * Pagination is keyset on (updatedAt, _id): rows read one bulk import at a time share
+   * a single updatedAt stamp, so the date alone cannot resume a page that broke inside
+   * the group — the boundary row's id can.
    */
   private async pullExpenses(
     userId: Types.ObjectId,
-    since: Date,
+    cursor: string | null,
     exclude: string[],
-  ): Promise<{ items: ExpenseRow[]; lastUpdatedAt?: Date }> {
+  ): Promise<{
+    items: ExpenseRow[];
+    count: number;
+    boundary?: { at: Date; id: string };
+  }> {
+    const dec = decodeCursor(cursor);
+    const cursorFilter = !dec.at
+      ? {}
+      : dec.rowId
+        ? {
+            $or: [
+              { updatedAt: { $gt: dec.at } },
+              {
+                updatedAt: dec.at,
+                _id: { $gt: new Types.ObjectId(dec.rowId) },
+              },
+            ],
+          }
+        : { updatedAt: { $gt: dec.at } };
+
     const rows = await this.expenses
       .find({
         userId,
-        updatedAt: { $gt: since },
+        ...cursorFilter,
         ...(exclude.length > 0 ? { clientId: { $nin: exclude } } : {}),
       })
-      .sort({ updatedAt: 1 })
+      .sort({ updatedAt: 1, _id: 1 })
       .limit(PAGE)
       .lean()
       .exec();
@@ -301,10 +356,13 @@ export class SyncService {
       deletedAt: ms(r.deletedAt),
     }));
 
+    const last = rows[rows.length - 1];
     return {
       items,
-      lastUpdatedAt:
-        rows.length > 0 ? rows[rows.length - 1].updatedAt : undefined,
+      count: rows.length,
+      ...(last && last.updatedAt
+        ? { boundary: { at: last.updatedAt, id: String(last._id) } }
+        : {}),
     };
   }
 
@@ -379,42 +437,53 @@ export class SyncService {
     userId: Types.ObjectId,
     cursor?: string | null,
   ): Promise<SyncResponse> {
-    const since = cursor
-      ? new Date(Math.min(new Date(cursor).getTime(), Date.now()))
-      : new Date(0);
+    // Taken before the reads, like sync(): a row written during this call must fall
+    // after the returned cursor, never inside it.
+    const anchor = new Date();
+    const sinceDate = decodeCursor(cursor).at ?? new Date(0);
 
     const [expensesPull, budgetsPull, exclusionsPull] = await Promise.all([
-      this.pullExpenses(userId, since, []),
-      this.pullBudgets(userId, since, []),
-      this.pullExclusions(userId, since, []),
+      this.pullExpenses(userId, cursor ?? null, []),
+      this.pullBudgets(userId, sinceDate, []),
+      this.pullExclusions(userId, sinceDate, []),
     ]);
 
     const expenses = expensesPull.items;
     const budgets = budgetsPull.items;
     const exclusions = exclusionsPull.items;
 
-    const cursorAnchor = new Date();
-    const safeLimits = [
-      expenses.length >= PAGE && expensesPull.lastUpdatedAt
-        ? expensesPull.lastUpdatedAt
-        : cursorAnchor,
-      budgets.length >= PAGE && budgetsPull.lastUpdatedAt
-        ? budgetsPull.lastUpdatedAt
-        : cursorAnchor,
-      exclusions.length >= PAGE && exclusionsPull.lastUpdatedAt
-        ? exclusionsPull.lastUpdatedAt
-        : cursorAnchor,
+    // Identical boundary logic to sync(): a full page resumes from its last row,
+    // a drained collection falls back to the anchor.
+    const boundaryEdge = expensesPull.boundary
+      ? { at: expensesPull.boundary.at, compound: expensesPull.boundary.id }
+      : { at: anchor };
+    const budgetEdge =
+      budgetsPull.items.length >= PAGE && budgetsPull.lastUpdatedAt
+        ? { at: budgetsPull.lastUpdatedAt }
+        : { at: anchor };
+    const exclEdge =
+      exclusionsPull.items.length >= PAGE && exclusionsPull.lastUpdatedAt
+        ? { at: exclusionsPull.lastUpdatedAt }
+        : { at: anchor };
+    const edges: { at: Date; compound?: string }[] = [
+      boundaryEdge,
+      budgetEdge,
+      exclEdge,
     ];
-    const nextCursor = new Date(
-      Math.min(...safeLimits.map((d) => d.getTime())),
+    const min = edges.reduce((m, b) =>
+      b.at.getTime() < m.at.getTime() ? b : m,
     );
+    const nextCursor =
+      min.compound !== undefined
+        ? `${min.at.toISOString()}|${min.compound}`
+        : min.at.toISOString();
 
     return {
-      cursor: nextCursor.toISOString(),
+      cursor: nextCursor,
       hasMore:
-        expenses.length >= PAGE ||
-        budgets.length >= PAGE ||
-        exclusions.length >= PAGE,
+        expensesPull.count >= PAGE ||
+        budgetsPull.items.length >= PAGE ||
+        exclusionsPull.items.length >= PAGE,
       expenses,
       budgets,
       exclusions,

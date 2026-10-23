@@ -115,7 +115,8 @@ export class SyncRequest {
 
   @Transform(({ value }: { value: unknown }) => (value === '' ? null : value))
   @IsOptional()
-  @IsISO8601()
+  @IsString()
+  @MaxLength(120)
   cursor?: string | null;
 
   @IsOptional()

@@ -29,10 +29,23 @@ export const MAX_PLAUSIBLE_PAISE = 100_000_000; // ₹10,00,000
 /** Two reports of one event sit this close together; two real transactions usually don't. */
 const DUPLICATE_WINDOW_MS = 5 * 60_000;
 
+/** Copies of one text arrive twice (live push + inbox rescan) with the inbox copy
+ *  tail-truncated, so exact-text equality misses them. Same amount, ≤5 min apart,
+ *  and one message a prefix of the other (≥40 normalized chars) is still one event. */
+const HEAD_MIN_CHARS = 40;
+
+const sameSms = (a: string | null, b: string | null): boolean => {
+  const x = norm(a);
+  const y = norm(b);
+  if (!x || !y) return false;
+  return x === y || (Math.min(x.length, y.length) >= HEAD_MIN_CHARS && (x.startsWith(y) || y.startsWith(x)));
+};
+
 /** How long after a prompt we await its matching transfer when checking whether one exists. */
 const REQUEST_PAIR_WINDOW_MS = 30 * 60_000;
 
-const norm = (s: string | null): string => (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+const norm = (s: string | null): string =>
+  (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 
 const sameLocalDay = (a: number, b: number): boolean =>
   new Date(a).toDateString() === new Date(b).toDateString();
@@ -97,11 +110,12 @@ export function sanitizeExpenses(input: ExpenseRow[]): {
     return r;
   });
 
-  // Duplicates: the same scan re-filed, or one event reported by two of the bank's
-  // templates. Only unambiguous pairs merge — identical message text, or two credit
-  // messages for the same amount on the same day, both inside the window.
-  // Amount+time alone is NOT a merge key: two real ₹5,000 withdrawals a minute apart
-  // have different reference numbers and different balances.
+  // Duplicates: the same scan re-filed, or one event reported twice by two ingestion
+  // channels (live push + inbox rescan, where the inbox copy is tail-truncated).
+  // Only unambiguous pairs merge — same amount inside the window and one message equal
+  // to the other or a head-prefix of it, or two credit messages for the same amount on
+  // the same day. Amount+time alone is NOT a merge key: two real ₹5,000 withdrawals a
+  // minute apart have different reference numbers and different balances.
   rows = [...rows].sort((a, b) => a.txnAt - b.txnAt);
   const kept: ExpenseRow[] = [];
   for (const r of rows) {
@@ -109,13 +123,21 @@ export function sanitizeExpenses(input: ExpenseRow[]): {
       (o) =>
         o.amountPaise === r.amountPaise &&
         Math.abs(o.txnAt - r.txnAt) <= DUPLICATE_WINDOW_MS &&
-        (norm(o.rawSms) === norm(r.rawSms) ||
+        (sameSms(o.rawSms, r.rawSms) ||
           (classify(o.rawSms) === 'income' &&
             classify(r.rawSms) === 'income' &&
             sameLocalDay(o.txnAt, r.txnAt))),
     );
     if (dup) stats.duplicates++;
-    else kept.push(r);
+    else {
+      kept.push(r);
+      continue;
+    }
+    if ((r.rawSms ?? '').length > (dup.rawSms ?? '').length && Math.abs(dup.txnAt - r.txnAt) <= 30_000) {
+      // Keep the fuller copy: its tail carries the parsed category/merchant, the
+      // truncated one often classifies as "Other". Amount is identical, so no money moves.
+      kept[kept.indexOf(dup)] = r;
+    }
   }
   return { rows: kept, stats };
 }
