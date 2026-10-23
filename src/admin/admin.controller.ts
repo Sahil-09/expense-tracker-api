@@ -52,6 +52,9 @@ export class AdminController {
     @Query('cursor') cursor?: string,
   ): Promise<SyncResponse> {
     const objectId = new Types.ObjectId(userId);
-    return this.admin.pullUserData({ userId: objectId, cursor: cursor ?? null });
+    return this.admin.pullUserData({
+      userId: objectId,
+      cursor: cursor ?? null,
+    });
   }
 }

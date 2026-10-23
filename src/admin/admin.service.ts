@@ -4,9 +4,13 @@ import { Model, Types } from 'mongoose';
 
 import { Device, DeviceDocument } from '../devices/device.schema';
 import { Expense, ExpenseDocument } from '../sync/expense.schema';
+import { ExpenseRow } from '../sync/dto';
+import { sanitizeExpenses } from '../sync/sanitize';
 import { User, UserDocument } from '../users/user.schema';
 import { SyncService } from '../sync/sync.service';
 import { env } from '../config/env';
+
+const msOf = (d?: Date | null) => (d ? d.getTime() : null);
 
 export interface AdminUserSummary {
   id: string;
@@ -69,7 +73,8 @@ export interface AdminExclusionRow {
 @Injectable()
 export class AdminService {
   constructor(
-    @InjectModel(Expense.name) private readonly expenses: Model<ExpenseDocument>,
+    @InjectModel(Expense.name)
+    private readonly expenses: Model<ExpenseDocument>,
     @InjectModel(User.name) private readonly users: Model<UserDocument>,
     @InjectModel(Device.name) private readonly devices: Model<DeviceDocument>,
     private readonly sync: SyncService,
@@ -78,68 +83,46 @@ export class AdminService {
   /**
    * Get all users with their aggregate spend/income for an optional date range.
    * Date range uses epoch milliseconds (browser-local month boundaries).
+   *
+   * Totals are computed in JS over each user's complete sanitized ledger — the same
+   * rules and spend predicate the phone and the dashboard apply — instead of a Mongo
+   * aggregate whose raw row set knows nothing about telecom junk, payment prompts or
+   * duplicate scans. The ledger is a few thousand rows; one code path beats a pipeline
+   * that quietly answers with different numbers than the app shows.
    */
   async getAllUsers(
     fromMs?: number,
     toMs?: number,
   ): Promise<AdminUserSummary[]> {
-    const match: Record<string, unknown> = {};
+    const docRows = await this.expenses
+      .find({})
+      .select(
+        'userId clientId amountPaise merchant category txnAt note rawSms dedupeKey source isExpense isDue isIncome deletedAt',
+      )
+      .lean()
+      .exec();
 
-    if (fromMs !== undefined || toMs !== undefined) {
-      // txnAt is a Mongoose Date — compare against Dates, not epoch ms numbers.
-      match.txnAt = {};
-      if (fromMs !== undefined) (match.txnAt as Record<string, Date>).$gte = new Date(fromMs);
-      if (toMs !== undefined) (match.txnAt as Record<string, Date>).$lt = new Date(toMs);
-    }
-
-    // Aggregate spend and income per user
-    const spendAgg = await this.expenses.aggregate<{
-      _id: Types.ObjectId;
-      spendPaise: number;
-      incomePaise: number;
-      txnCount: number;
-      lastTxnAt: number;
-    }>([
-      { $match: match },
-      {
-        $group: {
-          _id: '$userId',
-          spendPaise: {
-            $sum: {
-              $cond: [
-                { $and: ['$isExpense', { $not: '$isIncome' }, { $eq: ['$deletedAt', null] }] },
-                '$amountPaise',
-                0,
-              ],
-            },
-          },
-          incomePaise: {
-            $sum: { $cond: ['$isIncome', '$amountPaise', 0] },
-          },
-          txnCount: {
-            $sum: {
-              $cond: [
-                { $and: ['$isExpense', { $not: '$isIncome' }, { $eq: ['$deletedAt', null] }] },
-                1,
-                0,
-              ],
-            },
-          },
-          lastTxnAt: { $max: '$txnAt' },
-        },
-      },
-    ]).exec();
-
-    const byUser = new Map<string, number>();
-    const incomeByUser = new Map<string, number>();
-    const countByUser = new Map<string, number>();
-    const lastTxnByUser = new Map<string, number | null>();
-
-    for (const row of spendAgg) {
-      byUser.set(row._id.toString(), row.spendPaise);
-      incomeByUser.set(row._id.toString(), row.incomePaise);
-      countByUser.set(row._id.toString(), row.txnCount);
-      lastTxnByUser.set(row._id.toString(), row.lastTxnAt ? new Date(row.lastTxnAt as unknown as Date).getTime() : null);
+    const rawByUser = new Map<string, ExpenseRow[]>();
+    for (const d of docRows) {
+      const row: ExpenseRow = {
+        clientId: d.clientId,
+        amountPaise: d.amountPaise,
+        merchant: d.merchant ?? null,
+        category: d.category,
+        txnAt: d.txnAt.getTime(),
+        note: d.note ?? null,
+        rawSms: d.rawSms,
+        dedupeKey: d.dedupeKey,
+        source: d.source,
+        isExpense: d.isExpense,
+        isDue: d.isDue,
+        isIncome: d.isIncome ?? false,
+        deletedAt: msOf(d.deletedAt),
+      };
+      const key = String(d.userId);
+      const list = rawByUser.get(key);
+      if (list) list.push(row);
+      else rawByUser.set(key, [row]);
     }
 
     // Every registered account, not just those with rows in the window — a month
@@ -169,16 +152,42 @@ export class AdminService {
       }
     }
 
-    return userDocs.map((u) => ({
-      id: u._id.toString(),
-      email: u.email,
-      createdAt: u.createdAt!,
-      lastSeenAt: lastSeenByUser.get(u._id.toString()) ?? null,
-      spendPaise: byUser.get(u._id.toString()) ?? 0,
-      incomePaise: incomeByUser.get(u._id.toString()) ?? 0,
-      txnCount: countByUser.get(u._id.toString()) ?? 0,
-      lastTxnAt: lastTxnByUser.get(u._id.toString()) ?? null,
-    }));
+    return userDocs.map((u) => {
+      // Sanitize on the user's COMPLETE ledger, then filter the window: a prompt and
+      // its transfer can sit either side of a month boundary.
+      const { rows: clean } = sanitizeExpenses(
+        rawByUser.get(u._id.toString()) ?? [],
+      );
+      const inRange = clean.filter(
+        (r) =>
+          (fromMs === undefined || r.txnAt >= fromMs) &&
+          (toMs === undefined || r.txnAt < toMs),
+      );
+      let spendPaise = 0;
+      let incomePaise = 0;
+      let txnCount = 0;
+      let lastTxnAt: number | null = null;
+      for (const r of inRange) {
+        if (r.deletedAt !== null) continue;
+        if (lastTxnAt === null || r.txnAt > lastTxnAt) lastTxnAt = r.txnAt;
+        if (r.isExpense && !r.isIncome) {
+          spendPaise += r.amountPaise;
+          txnCount++;
+        } else if (r.isIncome) {
+          incomePaise += r.amountPaise;
+        }
+      }
+      return {
+        id: u._id.toString(),
+        email: u.email,
+        createdAt: u.createdAt!,
+        lastSeenAt: lastSeenByUser.get(u._id.toString()) ?? null,
+        spendPaise,
+        incomePaise,
+        txnCount,
+        lastTxnAt,
+      };
+    });
   }
 
   /**

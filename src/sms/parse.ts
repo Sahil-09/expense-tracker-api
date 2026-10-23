@@ -43,6 +43,18 @@ const REJECT = [
     /\b(pre[\s-]?approved|apply now|offer|voucher|lucky draw|click here|limited period|% ?off)\b/i,
     'promotion',
   ],
+  [
+    // Telecom service notices ("Due to no recharge, outgoing service has expired").
+    // Their sender numbers have been read as rupee amounts — ₹9.77 crore "spends".
+    /\bno recharge\b|outgoing service|service has expired\b/i,
+    'telecom-alert',
+  ],
+  [
+    // A payment prompt ("Swiggy is requesting payment of Rs.413") describes a
+    // transaction that has not happened yet. The actual debit arrives as its own SMS.
+    /\bis requesting payment\b|has requested money\b|requesting payment of\b/i,
+    'payment-request',
+  ],
 ] as const;
 
 // No `g` flag: detectDirection tests these repeatedly, and a global regex carries
@@ -155,12 +167,28 @@ function extractMerchant(body: string): string | null {
   return null;
 }
 
-/** Local noon avoids DST shifting a midnight timestamp into the previous day. */
+/** The two readings of a meridiem-less stamp are this far apart. */
+const HOUR_12 = 12 * 60 * 60 * 1000;
+
+/**
+ * How close the arrival must be to one reading before we trust it. The Shortcut fires as
+ * the SMS lands, so seconds. A message forwarded more than this stays undecided rather
+ * than guessed: the two readings are 12h apart, so a wrong pick needs the forward to be
+ * ~10-14h late, which an arrival-triggered automation never is.
+ */
+const MERIDIEM_WINDOW = 2 * 60 * 60 * 1000;
+
 /**
  * The body's own date stamps. Order matters: dd/mm, month names, then BOB's year-first
  * "(2026:10:21 07:34:50)" — whose bracket time replaces the noon when it parses.
+ *
+ * `anchor` is when the message arrived, and only decides one thing: which half of the day
+ * BOB's meridiem-less clock meant. Null when the caller knows nothing about arrival.
  */
-function parseBodyDate(body: string): { at: number; exact: boolean } | null {
+function parseBodyDate(
+  body: string,
+  anchor: number | null,
+): { at: number; exact: boolean } | null {
   const at = (
     d: number | null,
     exact = false,
@@ -185,22 +213,33 @@ function parseBodyDate(body: string): { at: number; exact: boolean } | null {
   if (m) {
     const hasTime =
       m[4] !== undefined && +m[4] < 24 && +m[5] < 60 && +m[6] < 60;
-    return at(
-      build(
-        +m[1],
-        +m[2],
-        +m[3],
-        hasTime ? +m[4] : 12,
-        hasTime ? +m[5] : 0,
-        hasTime ? +m[6] : 0,
-      ),
-      hasTime,
+    const stamped = build(
+      +m[1],
+      +m[2],
+      +m[3],
+      hasTime ? +m[4] : 12,
+      hasTime ? +m[5] : 0,
+      hasTime ? +m[6] : 0,
     );
+    if (stamped === null || !hasTime) return at(stamped, false);
+    const hour = +m[4];
+    // 00 and 13..23 mean the sender used a 24-hour clock; there is nothing to resolve.
+    if (hour === 0 || hour > 12) return at(stamped, true);
+    const other = hour === 12 ? stamped - HOUR_12 : stamped + HOUR_12;
+    if (anchor !== null) {
+      const near =
+        Math.abs(other - anchor) < Math.abs(stamped - anchor) ? other : stamped;
+      if (Math.abs(near - anchor) <= MERIDIEM_WINDOW) return at(near, true);
+    }
+    // No arrival close enough to decide: keep the reading we have always produced (the
+    // hour taken as written), but never claim it is exact.
+    return at(stamped, false);
   }
 
   return null;
 }
 
+/** Local noon avoids DST shifting a midnight timestamp into the previous day. */
 function build(
   year: number,
   month: number,
@@ -214,7 +253,18 @@ function build(
   return Number.isFinite(t) ? t : null;
 }
 
-export function parseSms(body: string, receivedAt: number | null): ParseResult {
+/**
+ * `receivedAt` is when the message was received, the transaction time of record when the
+ * caller has it. `anchor` is only used to decide the half of the day a meridiem-less body
+ * stamp meant; it defaults to `receivedAt` because, when both exist, they are the same
+ * moment. Callers that pass a body date as the transaction time but do know when the
+ * message arrived (a pasted block) pass the two separately.
+ */
+export function parseSms(
+  body: string,
+  receivedAt: number | null,
+  anchor: number | null = receivedAt,
+): ParseResult {
   const text = body.replace(/\s+/g, ' ').trim();
   if (!text) return { ok: false, reason: 'empty' };
 
@@ -228,7 +278,7 @@ export function parseSms(body: string, receivedAt: number | null): ParseResult {
   const amountPaise = extractAmount(text);
   if (!amountPaise) return { ok: false, reason: 'no-amount' };
 
-  const bodyDate = parseBodyDate(text);
+  const bodyDate = parseBodyDate(text, anchor);
   // receivedAt stays the single-message contract (an inbox row's receive time); the body
   // date is the fallback, and the exact flag rides along only for the bracket-time case.
   const txnAt = receivedAt ?? bodyDate?.at ?? null;
@@ -284,8 +334,9 @@ export type BulkResult =
 export function extractTransactions(
   body: string,
   receivedAt: number | null,
+  anchor: number | null = receivedAt,
 ): BulkResult {
-  const whole = parseSms(body, receivedAt);
+  const whole = parseSms(body, receivedAt, anchor);
   if (!whole.ok) return whole;
 
   const text = body.replace(/\s+/g, ' ').trim();
@@ -295,10 +346,11 @@ export function extractTransactions(
   const txns: PieceTxn[] = [];
   for (const piece of pieces) {
     // A piece carries its own in-body date when it has one; the caller's receive-time
-    // anchor only fills the gap. Key days must not depend on when the block arrived.
-    let r = parseSms(piece, null);
+    // anchor only fills the gap. Key days must not depend on when the block arrived, but
+    // the anchor still settles which half of the day a meridiem-less stamp meant.
+    let r = parseSms(piece, null, anchor);
     if (!r.ok && r.reason === 'no-date' && receivedAt !== null)
-      r = parseSms(piece, receivedAt);
+      r = parseSms(piece, receivedAt, anchor);
     if (r.ok) txns.push({ ...r.parsed, text: piece });
     if (txns.length >= MAX_BULK_TXNS) break;
   }

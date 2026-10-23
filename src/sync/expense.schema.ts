@@ -82,3 +82,7 @@ ExpenseSchema.index(
 
 // Cursor pulls.
 ExpenseSchema.index({ userId: 1, updatedAt: 1 });
+// Compound pull cursor: one bulk import stamps thousands of rows with an identical
+// updatedAt, a 500-row page breaks inside that tie group, and `updatedAt > cursor`
+// silently drops the remainder. The boundary row's _id breaks the tie.
+ExpenseSchema.index({ userId: 1, updatedAt: 1, _id: 1 });

@@ -160,6 +160,30 @@ describe('SmsService.ingest', () => {
     expect(out).toEqual({ status: 'skipped', reason: 'not-expense' });
     expect(create).not.toHaveBeenCalled();
   });
+
+  // BOB prints a 12-hour clock with no meridiem: "(2026:10:21 07:34:50)" is 7:34 AM or
+  // 7:34 PM and the text cannot say which. The arrival can, and the Shortcut fires as the
+  // SMS lands, so the server clock stands in when the payload carries no timestamp.
+  it('settles the half of the day from the arrival when the payload has none', async () => {
+    const now = jest
+      .spyOn(Date, 'now')
+      .mockReturnValue(new Date(2026, 9, 21, 19, 40).getTime());
+    try {
+      const { service, create } = makeService();
+      const out = await service.ingest(userId, {
+        body:
+          'Rs.69.00 Dr. from A/C XXXXXX0674 and Cr. to amzn@axl. Ref:1. ' +
+          'AvlBal:Rs4303.95(2026:10:21 07:34:50). Not you? Call 18005700/5000-BOB',
+      });
+      expect(out.status).toBe('added');
+      const row = create.mock.calls[0][0] ?? {};
+      expect((row.txnAt as Date).getTime()).toBe(
+        new Date(2026, 9, 21, 19, 34, 50).getTime(),
+      );
+    } finally {
+      now.mockRestore();
+    }
+  });
 });
 
 describe('SmsService.ingest — bulk statement SMS', () => {
@@ -279,6 +303,11 @@ describe('SmsService.ingest — bulk statement SMS', () => {
 });
 
 describe('parseSms (server copy)', () => {
+  // BOB's stamp: a 12-hour clock with no meridiem.
+  const BOB_0734 =
+    'Rs.69.00 Dr. from A/C XXXXXX0674 and Cr. to amzn@axl. Ref:1. ' +
+    'AvlBal:Rs4303.95(2026:10:21 07:34:50). Not you? Call 18005700/5000-BOB';
+
   it('uses the in-body date when no receivedAt is given', () => {
     const out = parseSms('Rs.320 debited at UBER on 19/10/2026', null);
     expect(out.ok).toBe(true);
@@ -365,6 +394,7 @@ describe('parseSms (server copy)', () => {
       'Rs.1000.00 Dr. from A/C XXXXXX0674 and Cr. to 8828924662@ibl. Ref:842857565217. ' +
         'AvlBal:Rs3861.13(2025:07:20 12:58:47). Not you? Call 18005700/5000-BOB',
       null,
+      new Date(2025, 6, 20, 13, 4).getTime(),
     );
     expect(out.ok).toBe(true);
     if (!out.ok) return;
@@ -372,6 +402,57 @@ describe('parseSms (server copy)', () => {
     expect(out.parsed.txnAt).toBe(new Date(2025, 6, 20, 12, 58, 47).getTime());
     expect(out.parsed.txnExact).toBe(true);
     expect(out.parsed.merchant).toBe('8828924662@ibl');
+  });
+
+  it('reads the BOB bracket stamp as a 12-hour clock: an evening arrival makes it PM', () => {
+    const out = parseSms(
+      BOB_0734,
+      null,
+      new Date(2026, 9, 21, 19, 40).getTime(),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.parsed.txnAt).toBe(new Date(2026, 9, 21, 19, 34, 50).getTime());
+    expect(out.parsed.txnExact).toBe(true);
+  });
+
+  it('keeps a morning arrival AM', () => {
+    const out = parseSms(
+      BOB_0734,
+      null,
+      new Date(2026, 9, 21, 7, 40).getTime(),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.parsed.txnAt).toBe(new Date(2026, 9, 21, 7, 34, 50).getTime());
+    expect(out.parsed.txnExact).toBe(true);
+  });
+
+  it('resolves the midnight side of a 12 o\u2019clock stamp', () => {
+    const out = parseSms(
+      'Rs.1000.00 Dr. from A/C XXXXXX0674 and Cr. to 8828924662@ibl. Ref:842857565217. ' +
+        'AvlBal:Rs3861.13(2025:07:20 12:58:47). Not you? Call 18005700/5000-BOB',
+      null,
+      new Date(2025, 6, 20, 0, 30).getTime(),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.parsed.txnAt).toBe(new Date(2025, 6, 20, 0, 58, 47).getTime());
+    expect(out.parsed.txnExact).toBe(true);
+  });
+
+  it('leaves the half of the day undecided when the arrival is too far away', () => {
+    // A pasted history row: the stamp is all we have, so it stays the hour as written and
+    // is never called exact.
+    const out = parseSms(
+      BOB_0734,
+      null,
+      new Date(2026, 9, 22, 10, 0).getTime(),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.parsed.txnAt).toBe(new Date(2026, 9, 21, 7, 34, 50).getTime());
+    expect(out.parsed.txnExact).toBeUndefined();
   });
 
   it('falls back to noon when the BOB stamp carries no time', () => {
