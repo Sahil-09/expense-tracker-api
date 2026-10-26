@@ -20,6 +20,13 @@ import { Expense, ExpenseDocument } from './expense.schema';
 /** Rows per pull per collection. Enough that a phone never loops on a normal sync. */
 const PAGE = 500;
 
+/**
+ * Above this many tombstones in one push is a cleared local DB, not a user: a real delete
+ * is one or two rows per sync. A wipe that slipped through once stamped `deletedAt` on
+ * every stored row and blanked its fields, so the wipe is refused wholesale.
+ */
+const MAX_TOMBSTONES_PER_PUSH = 20;
+
 const ms = (d?: Date | null) => (d ? d.getTime() : null);
 
 /**
@@ -203,23 +210,43 @@ export class SyncService {
     const written: string[] = [];
     const ops: Parameters<typeof this.expenses.bulkWrite>[0] = [];
 
+    const tombstoneCount = changes.filter((c) => c.deleted).length;
+    const wiping = tombstoneCount > MAX_TOMBSTONES_PER_PUSH;
+    if (wiping) {
+      this.log.warn(
+        `${tombstoneCount} tombstones in one push exceeds ${MAX_TOMBSTONES_PER_PUSH}: ` +
+          `looks like a local-data wipe, tombstones refused and stored rows left live`,
+      );
+    }
+
     for (const c of changes) {
-      if (!c.deleted) {
-        // Another row already holds this dedupeKey: the same SMS scanned on two phones.
-        // Recording the clash lets the phone drop its copy rather than ending up with one
-        // expense counted twice — which is exactly what the unique index would otherwise
-        // turn into a 500.
-        //
-        // Skipped for tombstones. A tombstone carries no message text, so its dedupeKey is
-        // a constant — checking it would make every delete after the first look like a
-        // duplicate of the previous one, and those deletes would be dropped forever.
-        const owner = held.get(c.dedupeKey);
-        if (owner !== undefined && owner !== c.clientId) {
-          duplicates[c.clientId] = owner;
-          continue;
-        }
-        held.set(c.dedupeKey, c.clientId);
+      if (c.deleted) {
+        if (wiping) continue; // refused: stays in the phone's backlog
+
+        // A tombstone only stamps deletedAt. The phone sends blanks for the other
+        // fields, and letting them through once overwrote a stored record with
+        // amountPaise 0 and empty text — the delete must carry data loss with it.
+        ops.push({
+          updateOne: {
+            filter: { userId, clientId: c.clientId },
+            update: { $set: { deletedAt: new Date() } },
+            upsert: true,
+          },
+        });
+        written.push(c.clientId);
+        continue;
       }
+
+      // Another row already holds this dedupeKey: the same SMS scanned on two phones.
+      // Recording the clash lets the phone drop its copy rather than ending up with one
+      // expense counted twice — which is exactly what the unique index would otherwise
+      // turn into a 500.
+      const owner = held.get(c.dedupeKey);
+      if (owner !== undefined && owner !== c.clientId) {
+        duplicates[c.clientId] = owner;
+        continue;
+      }
+      held.set(c.dedupeKey, c.clientId);
 
       ops.push({
         updateOne: {
@@ -237,9 +264,7 @@ export class SyncService {
               isExpense: c.isExpense,
               isDue: c.isDue,
               isIncome: c.isIncome ?? false,
-              // A delete is a tombstone, so the other phone learns about it and the row
-              // stays addressable to the cursor.
-              deletedAt: c.deleted ? new Date() : null,
+              deletedAt: null,
             },
           },
           upsert: true,
@@ -272,10 +297,10 @@ export class SyncService {
       await this.budgets.updateOne(
         { userId, category: c.category },
         {
-          $set: {
-            monthlyPaise: c.monthlyPaise,
-            deletedAt: c.deleted ? new Date() : null,
-          },
+          // A delete only stamps deletedAt: a wipe must not blank the budget either.
+          $set: c.deleted
+            ? { deletedAt: new Date() }
+            : { monthlyPaise: c.monthlyPaise, deletedAt: null },
         },
         { upsert: true },
       );
@@ -289,7 +314,8 @@ export class SyncService {
     for (const c of changes) {
       await this.exclusions.updateOne(
         { userId, merchant: c.merchant },
-        { $set: { deletedAt: c.deleted ? new Date() : null } },
+        // Same rule as budgets: deletes stamp deletedAt, never erase anything else.
+        { $set: c.deleted ? { deletedAt: new Date() } : { deletedAt: null } },
         { upsert: true },
       );
     }
