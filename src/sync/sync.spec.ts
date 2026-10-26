@@ -313,6 +313,44 @@ describe('POST /sync', () => {
     expect(tombstoned.filter((e) => e.deletedAt !== null)).toHaveLength(2);
   });
 
+  // The regression this guards: a push whose rows carry blanks (a cleared local DB) used
+  // to overwrite the stored row — amountPaise 0, empty rawSms — and tombstone it.
+  it('a tombstone never blanks the stored row', async () => {
+    await post({ deviceId: 'phone-a', expenses: [expense()] }, a).expect(201);
+    await post(
+      {
+        deviceId: 'phone-a',
+        expenses: [
+          { ...expense(), amountPaise: 0, rawSms: '', dedupeKey: '', deleted: true },
+        ],
+      },
+      a,
+    ).expect(201);
+
+    const row = await expenses().findOne({}).lean();
+    expect(row?.deletedAt).toBeTruthy();
+    expect(row?.amountPaise).toBe(14900);
+    expect(row?.rawSms).toBe('Zepto Rs.149.00 debited');
+  });
+
+  // A phone whose local data was cleared pushes a tombstone for every row. That is a
+  // wipe event, not a user deleting 25 expenses between syncs — refuse it wholesale.
+  it('a mass tombstone push over the cap is refused, rows stay live', async () => {
+    const rows = Array.from({ length: 25 }, (_, i) =>
+      expense({ clientId: `w-${i}`, dedupeKey: `k-${i}` }),
+    );
+    await post({ deviceId: 'phone-a', expenses: rows }, a).expect(201);
+    await post(
+      {
+        deviceId: 'phone-a',
+        expenses: rows.map((r) => ({ ...r, dedupeKey: '', deleted: true })),
+      },
+      a,
+    ).expect(201);
+
+    expect(await expenses().countDocuments({ deletedAt: null })).toBe(25);
+  });
+
   it('still collapses two phones capturing the same SMS', async () => {
     await post(
       { deviceId: 'phone-a', expenses: [expense({ clientId: 'from-a' })] },

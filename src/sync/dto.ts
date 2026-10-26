@@ -106,7 +106,6 @@ export class ExclusionChange {
  * would 400 exactly the request that matters most. 2000 rows of real SMS sit well under
  * the 4 MB body cap in `main.ts`.
  */
-export const MAX_PUSH_ROWS = 2000;
 
 export class SyncRequest {
   @IsString()
@@ -121,21 +120,18 @@ export class SyncRequest {
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(MAX_PUSH_ROWS)
   @ValidateNested({ each: true })
   @Type(() => ExpenseChange)
   expenses?: ExpenseChange[];
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(MAX_PUSH_ROWS)
   @ValidateNested({ each: true })
   @Type(() => BudgetChange)
   budgets?: BudgetChange[];
 
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(MAX_PUSH_ROWS)
   @ValidateNested({ each: true })
   @Type(() => ExclusionChange)
   exclusions?: ExclusionChange[];
