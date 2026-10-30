@@ -17,8 +17,15 @@ export class SmsRequest {
   receivedAt?: number;
 }
 
+export type PieceOutcome = {
+  index: number;
+  outcome: 'added' | 'duplicate' | 'skipped';
+  reason?: string;
+  clientId?: string;
+};
+
 export type SmsResponse =
-  | { status: 'added'; clientId: string }
-  | { status: 'added-multi'; clientIds: string[] }
-  | { status: 'duplicate' }
-  | { status: 'skipped'; reason: string };
+  | { status: 'added'; clientId: string; pieces?: PieceOutcome[] }
+  | { status: 'added-multi'; clientIds: string[]; pieces?: PieceOutcome[] }
+  | { status: 'duplicate'; pieces?: PieceOutcome[] }
+  | { status: 'skipped'; reason: string; pieces?: PieceOutcome[] };

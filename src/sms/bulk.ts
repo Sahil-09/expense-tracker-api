@@ -144,8 +144,8 @@ export async function mintMissingRows(
   expenses: Model<ExpenseDocument>,
   userId: Types.ObjectId,
   pieces: PieceRow[],
-): Promise<number> {
-  if (pieces.length === 0) return 0;
+): Promise<{ created: number; details: { dedupeKey: string; clientId: string; created: boolean }[] }> {
+  if (pieces.length === 0) return { created: 0, details: [] };
   const held = new Set(
     (
       await expenses
@@ -157,11 +157,17 @@ export async function mintMissingRows(
   );
 
   let created = 0;
+  const details: { dedupeKey: string; clientId: string; created: boolean }[] = [];
   for (const piece of pieces) {
-    if (held.has(piece.dedupeKey)) continue;
+    const wasHeld = held.has(piece.dedupeKey);
+    if (wasHeld) {
+      details.push({ dedupeKey: piece.dedupeKey, clientId: piece.clientId, created: false });
+      continue;
+    }
     try {
       await expenses.create(piece);
       created++;
+      details.push({ dedupeKey: piece.dedupeKey, clientId: piece.clientId, created: true });
     } catch (e) {
       if (
         typeof e !== 'object' ||
@@ -169,9 +175,10 @@ export async function mintMissingRows(
         (e as { code?: number }).code !== 11000
       )
         throw e;
+      details.push({ dedupeKey: piece.dedupeKey, clientId: piece.clientId, created: false });
     }
   }
-  return created;
+  return { created, details };
 }
 
 /** The stored fields a piece-1 repair may overwrite, one row of the reconcile below. */

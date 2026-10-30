@@ -14,7 +14,7 @@ import {
   merchantExcluded,
   mintMissingRows,
 } from './bulk';
-import { SmsRequest, SmsResponse } from './dto';
+import { SmsRequest, SmsResponse, PieceOutcome } from './dto';
 import { extractTransactions, PieceTxn } from './parse';
 
 @Injectable()
@@ -70,14 +70,17 @@ export class SmsService {
   }
 
   private async ingestInternal(userId: Types.ObjectId, req: SmsRequest): Promise<SmsResponse> {
-    // The arrival is the only evidence of which half of the day a meridiem-less bank
-    // stamp meant. The Shortcut fires as the SMS lands, so the server clock serves when
-    // the payload carries no timestamp of its own.
     const anchor = req.receivedAt ?? Date.now();
     const batch = extractTransactions(req.body, req.receivedAt ?? null, anchor);
+
+    // One piece per parsed transaction; skipped / duplicate outcomes carry reasons.
     if (!batch.ok) {
       this.log.log(`skipped (${batch.reason}), ${req.body.length} chars`);
-      return { status: 'skipped', reason: batch.reason };
+      return {
+        status: 'skipped',
+        reason: batch.reason,
+        pieces: [{ index: 0, outcome: 'skipped', reason: batch.reason }],
+      };
     }
     if (batch.txns.length > 1)
       return this.ingestBulk(userId, req.body, batch.txns);
@@ -85,24 +88,35 @@ export class SmsService {
     const { amountPaise, merchant, txnAt, kind } = batch.txns[0];
     const key = dedupeKey(req.body, txnAt);
 
-    // Checked before the insert so the common case is a cheap read. The unique partial
-    // index still backstops a race; see the catch below.
     const held = await this.expenses
       .findOne({ userId, dedupeKey: key, deletedAt: null })
       .select('clientId')
       .lean()
       .exec();
-    if (held) return { status: 'duplicate' };
+    if (held) {
+      return {
+        status: 'duplicate',
+        pieces: [
+          { index: 0, outcome: 'duplicate' },
+          ...(() => {
+            // where else? top-level parse failed scenarios expand pieces from 0
+            return [];
+          })(),
+        ],
+      };
+    }
 
-    // A payment the user once flagged as personal must never come back as a spend. Income
-    // is exempt: that verdict was about spending, and applying it to a refund would hide
-    // money coming back in.
     if (
       kind !== 'income' &&
       merchant &&
       (await merchantExcluded(this.exclusions, userId, merchant))
     ) {
-      return { status: 'skipped', reason: 'not-expense' };
+      this.log.log('skipped (not-expense), merchant flagged');
+      return {
+        status: 'skipped',
+        reason: 'not-expense',
+        pieces: [{ index: 0, outcome: 'skipped', reason: 'not-expense' }],
+      };
     }
 
     const clientId = randomUUID();
@@ -124,42 +138,81 @@ export class SmsService {
         deletedAt: null,
       });
     } catch (e) {
-      // Two Shortcut runs (or a phone scan) can race past the read above. The unique
-      // partial index settles it; report the loser as a duplicate rather than a 500.
       if (
         typeof e === 'object' &&
         e !== null &&
         (e as { code?: number }).code === 11000
       ) {
-        return { status: 'duplicate' };
+        return { status: 'duplicate', pieces: [{ index: 0, outcome: 'duplicate' }] };
       }
       throw e;
     }
 
     this.log.log(`added ${clientId} (${kind}), ${amountPaise} paise`);
-    return { status: 'added', clientId };
+    return {
+      status: 'added',
+      clientId,
+      pieces: [{ index: 0, outcome: 'added', clientId }],
+    };
   }
 
   /**
    * A bulk statement SMS becomes one row per transaction. Piece 1 keeps the plain
    * (body, day) dedupe key — an old phone's single-row scan of the same message
-   * collapses into it — and pieces 2..n take the indexed sub-key.
+   * collapses into it — and pieces 2..n take the indexed sub-key. Excluded merchants
+   * are reported as skipped rather than dropped, so every piece shows its outcome.
    */
   private async ingestBulk(
     userId: Types.ObjectId,
     body: string,
     txns: PieceTxn[],
   ): Promise<SmsResponse> {
-    const pieces = await bulkRows(
+    const rows = await bulkRows(
       this.exclusions,
       userId,
       body,
       txns,
       'ios-shortcut',
     );
-    const created = await mintMissingRows(this.expenses, userId, pieces);
-    if (created === 0) return { status: 'duplicate' };
-    this.log.log(`bulk ${body.length} chars -> ${created} rows`);
-    return { status: 'added-multi', clientIds: pieces.map((p) => p.clientId) };
+    const fresh = await mintMissingRows(this.expenses, userId, rows);
+
+    // Build a lookup from dedupeKey to result for included pieces.
+    const resultByDedupe = new Map<string, { created: boolean; clientId: string }>();
+    for (const d of fresh.details) {
+      resultByDedupe.set(d.dedupeKey, { created: d.created, clientId: d.clientId });
+    }
+
+    const pieces: PieceOutcome[] = [];
+    const createdIds: string[] = [];
+
+    // Included pieces: match by clientId / dedupeKey order preserved by mint details.
+    for (const row of rows) {
+      const res = resultByDedupe.get(row.dedupeKey);
+      const outcome = res && res.created ? 'added' : 'duplicate';
+      const clientId = row.clientId; // present regardless
+      pieces.push({ index: pieces.length + 1, outcome, ...(res && res.created ? { clientId } : {}) });
+      if (res && res.created) createdIds.push(clientId);
+    }
+
+    // Excluded pieces: anything in txns whose text isn't represented in rows.
+    const includedTexts = new Set(rows.map((r) => r.rawSms.trim()));
+    let excludedIndex = 0; // index starts at 1 for each excluded text in order
+    for (const t of txns) {
+      if (!includedTexts.has(t.text.trim())) {
+        excludedIndex++;
+        pieces.push({ index: rows.length + excludedIndex, outcome: 'skipped', reason: 'not-expense' });
+      }
+    }
+
+    const createdCount = fresh.created;
+    const anyAdded = createdCount > 0;
+    const allDuplicates = createdCount === 0 && rows.length > 0;
+    if (allDuplicates && fresh.details.every((d) => !d.created)) {
+      return { status: 'duplicate', pieces };
+    }
+    if (anyAdded) {
+      return { status: 'added-multi', clientIds: createdIds, pieces };
+    }
+    return { status: 'duplicate', pieces };
   }
 }
