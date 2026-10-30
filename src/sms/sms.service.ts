@@ -6,6 +6,7 @@ import { Model, Types } from 'mongoose';
 import { SafeLogger } from '../logging/safe-logger';
 import { Exclusion, ExclusionDocument } from '../sync/exclusion.schema';
 import { Expense, ExpenseDocument } from '../sync/expense.schema';
+import { SmsLog, SmsLogDocument } from './sms-log.schema';
 import {
   bulkRows,
   categoryFor,
@@ -20,11 +21,27 @@ import { extractTransactions, PieceTxn } from './parse';
 export class SmsService {
   private readonly log = new SafeLogger(SmsService.name);
 
+  async logSms(
+    userId: Types.ObjectId,
+    body: string,
+    response: unknown,
+    error?: string,
+  ): Promise<void> {
+    await this.smsLogs.create({
+      userId,
+      body,
+      response,
+      error,
+    });
+  }
+
   constructor(
     @InjectModel(Expense.name)
     private readonly expenses: Model<ExpenseDocument>,
     @InjectModel(Exclusion.name)
     private readonly exclusions: Model<ExclusionDocument>,
+    @InjectModel(SmsLog.name)
+    private readonly smsLogs: Model<SmsLogDocument>,
   ) {}
 
   /**
@@ -35,6 +52,24 @@ export class SmsService {
    * holds one token and must not be able to write into another account.
    */
   async ingest(userId: Types.ObjectId, req: SmsRequest): Promise<SmsResponse> {
+    let result: SmsResponse | undefined;
+    let error: string | undefined;
+    try {
+      result = await this.ingestInternal(userId, req);
+      return result;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+      throw e;
+    } finally {
+      try {
+        await this.logSms(userId, req.body, result ?? {}, error);
+      } catch {
+        // Logging failure must not suppress the SMS result or error.
+      }
+    }
+  }
+
+  private async ingestInternal(userId: Types.ObjectId, req: SmsRequest): Promise<SmsResponse> {
     // The arrival is the only evidence of which half of the day a meridiem-less bank
     // stamp meant. The Shortcut fires as the SMS lands, so the server clock serves when
     // the payload carries no timestamp of its own.

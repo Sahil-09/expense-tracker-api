@@ -60,7 +60,8 @@ function makeService(
       }),
     })),
   };
-  const service = new SmsService(expenses as never, exclusions as never);
+  const smsLogs = { create: jest.fn(() => Promise.resolve({})) };
+  const service = new SmsService(expenses as never, exclusions as never, smsLogs as never);
   return { service, create, expenses, exclusions };
 }
 
